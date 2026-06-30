@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import { useNotes } from "../../context/NotesContext";
 import { useTheme } from "../../context/ThemeContext";
@@ -35,6 +36,48 @@ interface ResourceMigrationResult {
   resourcesMoved: number;
   referencesUpdated: number;
   referencesSkipped: number;
+}
+
+interface ResourceMigrationProgress {
+  totalNotes: number;
+  processedNotes: number;
+  currentNote: string | null;
+  notesUpdated: number;
+  resourcesMoved: number;
+  referencesUpdated: number;
+  referencesSkipped: number;
+  finished: boolean;
+}
+
+function formatResourceStorageLocation(location: ResourceStorageLocation) {
+  return location === "assets" ? "/assets" : "same folder";
+}
+
+function formatDuration(milliseconds: number) {
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) return "calculating";
+  const totalSeconds = Math.max(1, Math.ceil(milliseconds / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes === 0) return `${seconds}s`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  if (hours === 0) return `${minutes}m ${seconds}s`;
+  return `${hours}h ${remainingMinutes}m`;
+}
+
+function formatMigrationEta(
+  progress: ResourceMigrationProgress | null,
+  startedAt: number | null,
+) {
+  if (!progress || !startedAt) return "calculating";
+  if (progress.finished || progress.processedNotes >= progress.totalNotes) return "0s";
+  if (progress.totalNotes === 0) return "0s";
+  if (progress.processedNotes === 0) return "calculating";
+
+  const elapsed = Date.now() - startedAt;
+  const average = elapsed / progress.processedNotes;
+  const remaining = progress.totalNotes - progress.processedNotes;
+  return formatDuration(average * remaining);
 }
 
 // Format remote URL for display - extract user/repo from full URL
@@ -779,10 +822,17 @@ function ResourceStorageSettings() {
   const { notesFolder, refreshNotes, reloadCurrentNote } = useNotes();
   const [location, setLocation] =
     useState<ResourceStorageLocation>(DEFAULT_RESOURCE_STORAGE_LOCATION);
+  const [pendingLocation, setPendingLocation] =
+    useState<ResourceStorageLocation | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [isMigrating, setIsMigrating] = useState(false);
   const [migrationDialogOpen, setMigrationDialogOpen] = useState(false);
+  const [migrationProgress, setMigrationProgress] =
+    useState<ResourceMigrationProgress | null>(null);
+  const [migrationStartedAt, setMigrationStartedAt] = useState<number | null>(
+    null,
+  );
 
   useEffect(() => {
     setIsLoading(true);
@@ -796,40 +846,85 @@ function ResourceStorageSettings() {
         console.error("Failed to load resource storage setting:", error);
         setLocation(DEFAULT_RESOURCE_STORAGE_LOCATION);
       })
-      .finally(() => setIsLoading(false));
+      .finally(() => {
+        setPendingLocation(null);
+        setMigrationProgress(null);
+        setMigrationStartedAt(null);
+        setIsLoading(false);
+      });
   }, [notesFolder]);
 
-  const handleChangeLocation = async (next: ResourceStorageLocation) => {
-    if (isSaving || next === location) return;
-    setIsSaving(true);
-    try {
-      const settings = await invoke<Settings>("get_settings");
-      await invoke("update_settings", {
-        newSettings: {
-          ...settings,
-          resourceStorageLocation: next,
-        },
-      });
-      setLocation(next);
-      setMigrationDialogOpen(true);
-      toast.success("Resource storage saved");
-    } catch (error) {
-      console.error("Failed to save resource storage setting:", error);
-      toast.error("Failed to save resource storage");
-    } finally {
-      setIsSaving(false);
-    }
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+
+    listen<ResourceMigrationProgress>(
+      "resource-migration-progress",
+      (event) => {
+        setMigrationProgress(event.payload);
+      },
+    ).then((fn) => {
+      if (cancelled) {
+        fn();
+      } else {
+        unlisten = fn;
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  const resetMigrationDialog = () => {
+    setPendingLocation(null);
+    setMigrationProgress(null);
+    setMigrationStartedAt(null);
+  };
+
+  const handleMigrationDialogOpenChange = (open: boolean) => {
+    if (isMigrating) return;
+    setMigrationDialogOpen(open);
+    if (!open) resetMigrationDialog();
+  };
+
+  const openMigrationDialog = (targetLocation: ResourceStorageLocation | null) => {
+    setPendingLocation(targetLocation);
+    setMigrationProgress(null);
+    setMigrationStartedAt(null);
+    setMigrationDialogOpen(true);
+  };
+
+  const handleChangeLocation = (next: ResourceStorageLocation) => {
+    if (disabled || next === location) return;
+    openMigrationDialog(next);
   };
 
   const handleMigrate = async () => {
     if (isMigrating) return;
+    const targetLocation = pendingLocation ?? location;
     setIsMigrating(true);
+    setMigrationProgress(null);
+    setMigrationStartedAt(Date.now());
     try {
       const result = await invoke<ResourceMigrationResult>(
         "migrate_resource_storage",
-        { targetLocation: location },
+        { targetLocation },
       );
+      if (pendingLocation && pendingLocation !== location) {
+        setIsSaving(true);
+        const settings = await invoke<Settings>("get_settings");
+        await invoke("update_settings", {
+          newSettings: {
+            ...settings,
+            resourceStorageLocation: targetLocation,
+          },
+        });
+        setLocation(targetLocation);
+      }
       setMigrationDialogOpen(false);
+      resetMigrationDialog();
       await refreshNotes();
       await reloadCurrentNote();
       toast.success(
@@ -844,11 +939,29 @@ function ResourceStorageSettings() {
       console.error("Failed to migrate resources:", error);
       toast.error("Failed to migrate resources");
     } finally {
+      setIsSaving(false);
       setIsMigrating(false);
     }
   };
 
   const disabled = isLoading || isSaving || isMigrating;
+  const migrationTarget = pendingLocation ?? location;
+  const migrationProgressPercent =
+    migrationProgress && migrationProgress.totalNotes > 0
+      ? Math.min(
+          100,
+          Math.round(
+            (migrationProgress.processedNotes / migrationProgress.totalNotes) *
+              100,
+          ),
+        )
+      : migrationProgress?.finished
+        ? 100
+        : 0;
+  const migrationEta = formatMigrationEta(
+    migrationProgress,
+    migrationStartedAt,
+  );
 
   return (
     <section className="pb-2">
@@ -890,7 +1003,7 @@ function ResourceStorageSettings() {
           updates Markdown references without keeping duplicate files.
         </p>
         <Button
-          onClick={() => setMigrationDialogOpen(true)}
+          onClick={() => openMigrationDialog(null)}
           variant="outline"
           size="sm"
           disabled={disabled}
@@ -902,20 +1015,46 @@ function ResourceStorageSettings() {
 
       <AlertDialog
         open={migrationDialogOpen}
-        onOpenChange={setMigrationDialogOpen}
+        onOpenChange={handleMigrationDialogOpenChange}
       >
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Migrate existing resources?</AlertDialogTitle>
             <AlertDialogDescription>
-              New images will use the selected storage location from now on.
-              Migration moves existing resources to that location and rewrites
-              the Markdown references. Shared resources that cannot be moved
-              without duplication are left unchanged.
+              {pendingLocation
+                ? `New images will use ${formatResourceStorageLocation(migrationTarget)} after migration. Cancel keeps the current setting unchanged.`
+                : `Existing resources will be moved to ${formatResourceStorageLocation(migrationTarget)} and Markdown references will be rewritten.`}
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {isMigrating && (
+            <div className="space-y-3 rounded-[10px] border border-border p-3">
+              <div className="flex items-center justify-between gap-3 text-sm">
+                <span className="font-medium text-text">
+                  {migrationProgress?.processedNotes ?? 0} /{" "}
+                  {migrationProgress?.totalNotes ?? 0} documents
+                </span>
+                <span className="text-text-muted">ETA {migrationEta}</span>
+              </div>
+              <div className="h-2 overflow-hidden rounded-full bg-bg-muted">
+                <div
+                  className="h-full rounded-full bg-accent transition-[width]"
+                  style={{ width: `${migrationProgressPercent}%` }}
+                />
+              </div>
+              <div className="space-y-1 text-xs text-text-muted">
+                <p className="truncate" title={migrationProgress?.currentNote ?? undefined}>
+                  Current: {migrationProgress?.currentNote ?? "Preparing migration..."}
+                </p>
+                <p>
+                  Updated {migrationProgress?.notesUpdated ?? 0} notes, moved{" "}
+                  {migrationProgress?.resourcesMoved ?? 0} resources, skipped{" "}
+                  {migrationProgress?.referencesSkipped ?? 0} references
+                </p>
+              </div>
+            </div>
+          )}
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={isMigrating}>Later</AlertDialogCancel>
+            <AlertDialogCancel disabled={isMigrating}>Cancel</AlertDialogCancel>
             <AlertDialogAction
               onClick={(e) => {
                 e.preventDefault();

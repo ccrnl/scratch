@@ -2534,6 +2534,19 @@ pub struct ResourceMigrationResult {
     pub references_skipped: usize,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceMigrationProgress {
+    pub total_notes: usize,
+    pub processed_notes: usize,
+    pub current_note: Option<String>,
+    pub notes_updated: usize,
+    pub resources_moved: usize,
+    pub references_updated: usize,
+    pub references_skipped: usize,
+    pub finished: bool,
+}
+
 struct ResourceMigrationContext {
     notes_root: PathBuf,
     target_location: ResourceStorageLocation,
@@ -2756,6 +2769,32 @@ fn collect_ambiguous_resource_sources(
         .collect())
 }
 
+fn migration_note_label(notes_root: &Path, path: &Path) -> String {
+    path.strip_prefix(notes_root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/")
+}
+
+fn migration_progress(
+    total_notes: usize,
+    processed_notes: usize,
+    current_note: Option<String>,
+    result: &ResourceMigrationResult,
+    finished: bool,
+) -> ResourceMigrationProgress {
+    ResourceMigrationProgress {
+        total_notes,
+        processed_notes,
+        current_note,
+        notes_updated: result.notes_updated,
+        resources_moved: result.resources_moved,
+        references_updated: result.references_updated,
+        references_skipped: result.references_skipped,
+        finished,
+    }
+}
+
 fn migrate_resource_src(
     src: &str,
     note_dir: &Path,
@@ -2887,6 +2926,7 @@ fn migrate_resource_storage_blocking(
     notes_root: PathBuf,
     ignored_dirs: Vec<String>,
     target_location: ResourceStorageLocation,
+    mut on_progress: impl FnMut(ResourceMigrationProgress),
 ) -> Result<ResourceMigrationResult, String> {
     use walkdir::WalkDir;
 
@@ -2899,6 +2939,7 @@ fn migrate_resource_storage_blocking(
         .collect();
     let ambiguous_sources =
         collect_ambiguous_resource_sources(&note_paths, &notes_root, target_location)?;
+    let total_notes = note_paths.len();
 
     let mut context = ResourceMigrationContext {
         notes_root: notes_root.clone(),
@@ -2909,7 +2950,25 @@ fn migrate_resource_storage_blocking(
         result: ResourceMigrationResult::default(),
     };
 
+    on_progress(migration_progress(
+        total_notes,
+        0,
+        None,
+        &context.result,
+        false,
+    ));
+
+    let mut processed_notes = 0;
     for path in note_paths {
+        let current_note = migration_note_label(&notes_root, &path);
+        on_progress(migration_progress(
+            total_notes,
+            processed_notes,
+            Some(current_note.clone()),
+            &context.result,
+            false,
+        ));
+
         context.result.notes_scanned += 1;
         let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
         let note_dir = path.parent().unwrap_or(&notes_root);
@@ -2923,6 +2982,15 @@ fn migrate_resource_storage_blocking(
             std::fs::write(&path, rewritten).map_err(|e| e.to_string())?;
             context.result.notes_updated += 1;
         }
+
+        processed_notes += 1;
+        on_progress(migration_progress(
+            total_notes,
+            processed_notes,
+            Some(current_note),
+            &context.result,
+            false,
+        ));
     }
 
     for source in &context.original_sources_to_remove {
@@ -2937,12 +3005,21 @@ fn migrate_resource_storage_blocking(
         }
     }
 
+    on_progress(migration_progress(
+        total_notes,
+        processed_notes,
+        None,
+        &context.result,
+        true,
+    ));
+
     Ok(context.result)
 }
 
 #[tauri::command]
 async fn migrate_resource_storage(
     target_location: ResourceStorageLocation,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ResourceMigrationResult, String> {
     let (folder, ignored_dirs) = {
@@ -2956,7 +3033,14 @@ async fn migrate_resource_storage(
     };
 
     tokio::task::spawn_blocking(move || {
-        migrate_resource_storage_blocking(PathBuf::from(folder), ignored_dirs, target_location)
+        migrate_resource_storage_blocking(
+            PathBuf::from(folder),
+            ignored_dirs,
+            target_location,
+            move |progress| {
+                let _ = app.emit("resource-migration-progress", progress);
+            },
+        )
     })
     .await
     .map_err(|e| format!("Migration task failed: {}", e))?
@@ -4146,6 +4230,7 @@ mod tests {
             root.clone(),
             vec![],
             ResourceStorageLocation::NoteFolder,
+            |_| {},
         )
         .expect("migration succeeds");
 
@@ -4172,9 +4257,13 @@ mod tests {
         let note_path = note_dir.join("Note.md");
         std::fs::write(&note_path, "![a](a.png)").expect("write note");
 
-        let result =
-            migrate_resource_storage_blocking(root.clone(), vec![], ResourceStorageLocation::Assets)
-                .expect("migration succeeds");
+        let result = migrate_resource_storage_blocking(
+            root.clone(),
+            vec![],
+            ResourceStorageLocation::Assets,
+            |_| {},
+        )
+        .expect("migration succeeds");
 
         let content = std::fs::read_to_string(&note_path).expect("read note");
         assert_eq!(content, "![a](../assets/a.png)");
@@ -4207,6 +4296,7 @@ mod tests {
             root.clone(),
             vec![],
             ResourceStorageLocation::NoteFolder,
+            |_| {},
         )
         .expect("migration succeeds");
 
@@ -4247,6 +4337,7 @@ mod tests {
             root.clone(),
             vec![],
             ResourceStorageLocation::NoteFolder,
+            |_| {},
         )
         .expect("migration succeeds");
 
@@ -4264,6 +4355,33 @@ mod tests {
         assert_eq!(result.resources_moved, 0);
         assert_eq!(result.references_updated, 0);
         assert_eq!(result.references_skipped, 1);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn emits_resource_migration_progress() {
+        let root = test_dir("resource-migration-progress");
+        let note_dir = root.join("Folder");
+        std::fs::create_dir_all(&note_dir).expect("create note dir");
+        std::fs::write(note_dir.join("a.png"), b"png").expect("write image");
+        let note_path = note_dir.join("Note.md");
+        std::fs::write(&note_path, "![a](a.png)").expect("write note");
+
+        let mut progress_events = Vec::new();
+        migrate_resource_storage_blocking(
+            root.clone(),
+            vec![],
+            ResourceStorageLocation::Assets,
+            |progress| progress_events.push(progress),
+        )
+        .expect("migration succeeds");
+
+        assert!(progress_events.len() >= 3);
+        assert_eq!(progress_events.first().unwrap().total_notes, 1);
+        assert_eq!(progress_events.first().unwrap().processed_notes, 0);
+        assert_eq!(progress_events.last().unwrap().processed_notes, 1);
+        assert!(progress_events.last().unwrap().finished);
 
         let _ = std::fs::remove_dir_all(root);
     }
