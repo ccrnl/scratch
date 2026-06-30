@@ -28,6 +28,7 @@ import {
 } from "@tauri-apps/plugin-updater";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import * as aiService from "./services/ai";
+import * as notesService from "./services/notes";
 import type { AiProvider } from "./services/ai";
 
 // Detect preview mode from URL search params
@@ -45,6 +46,17 @@ function getWindowMode(): {
 }
 
 type ViewState = "notes" | "settings";
+
+const DEFAULT_SIDEBAR_WIDTH = 256;
+const MIN_SIDEBAR_WIDTH = 200;
+const MAX_SIDEBAR_WIDTH = 520;
+
+function clampSidebarWidth(width: number): number {
+  return Math.min(
+    Math.max(Math.round(width), MIN_SIDEBAR_WIDTH),
+    MAX_SIDEBAR_WIDTH,
+  );
+}
 
 function AppContent() {
   const {
@@ -69,12 +81,63 @@ function AppContent() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [view, setView] = useState<ViewState>("notes");
   const [sidebarVisible, setSidebarVisible] = useState(true);
+  const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
+  const [sidebarResizing, setSidebarResizing] = useState(false);
   const [aiModalOpen, setAiModalOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [aiEditing, setAiEditing] = useState(false);
   const [focusMode, setFocusMode] = useState(false);
   const [aiProvider, setAiProvider] = useState<AiProvider>("claude");
   const editorRef = useRef<TiptapEditor | null>(null);
+
+  useEffect(() => {
+    if (!notesFolder) return;
+
+    let cancelled = false;
+    notesService
+      .getSettings()
+      .then((settings) => {
+        if (cancelled) return;
+        if (typeof settings.sidebarWidth === "number") {
+          setSidebarWidth(clampSidebarWidth(settings.sidebarWidth));
+        } else {
+          setSidebarWidth(DEFAULT_SIDEBAR_WIDTH);
+        }
+      })
+      .catch((error) => {
+        console.error("Failed to load sidebar width:", error);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [notesFolder]);
+
+  const persistSidebarWidth = useCallback(async (width: number) => {
+    const nextWidth = clampSidebarWidth(width);
+    try {
+      const settings = await notesService.getSettings();
+      await notesService.updateSettings({
+        ...settings,
+        sidebarWidth: nextWidth,
+      });
+    } catch (error) {
+      console.error("Failed to save sidebar width:", error);
+    }
+  }, []);
+
+  const handleSidebarWidthChange = useCallback((width: number) => {
+    setSidebarWidth(clampSidebarWidth(width));
+  }, []);
+
+  const handleSidebarWidthCommit = useCallback(
+    (width: number) => {
+      const nextWidth = clampSidebarWidth(width);
+      setSidebarWidth(nextWidth);
+      void persistSidebarWidth(nextWidth);
+    },
+    [persistSidebarWidth],
+  );
 
   // Listen for set-notes-folder event from CLI (scratch .)
   // Placed here in AppContent where both NotesContext and ThemeContext are available
@@ -472,9 +535,29 @@ function AppContent() {
           <>
             <div
               data-sidebar
-              className={`transition-all duration-500 ease-out overflow-hidden ${!sidebarVisible || focusMode ? "opacity-0 -translate-x-4 w-0 pointer-events-none" : "opacity-100 translate-x-0 w-64"}`}
+              style={{
+                width: !sidebarVisible || focusMode ? 0 : sidebarWidth,
+              }}
+              className={`${
+                sidebarResizing
+                  ? "transition-none"
+                  : "transition-all duration-500 ease-out"
+              } shrink-0 overflow-hidden ${
+                !sidebarVisible || focusMode
+                  ? "opacity-0 -translate-x-4 pointer-events-none"
+                  : "opacity-100 translate-x-0"
+              }`}
             >
-              <Sidebar onOpenSettings={toggleSettings} />
+              <Sidebar
+                onOpenSettings={toggleSettings}
+                width={sidebarWidth}
+                defaultWidth={DEFAULT_SIDEBAR_WIDTH}
+                minWidth={MIN_SIDEBAR_WIDTH}
+                maxWidth={MAX_SIDEBAR_WIDTH}
+                onWidthChange={handleSidebarWidthChange}
+                onWidthCommit={handleSidebarWidthCommit}
+                onResizeActiveChange={setSidebarResizing}
+              />
             </div>
             <Editor
               onToggleSidebar={toggleSidebar}
