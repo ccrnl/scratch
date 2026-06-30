@@ -302,8 +302,13 @@ export function GeneralSettingsSection() {
             </Button>
           )}
         </div>
-        <ResourceStorageSettings />
       </section>
+
+      {/* Divider */}
+      <div className="border-t border-border border-dashed" />
+
+      {/* Resource Storage */}
+      <ResourceStorageSettings />
 
       {/* Divider */}
       <div className="border-t border-border border-dashed" />
@@ -846,12 +851,13 @@ function ResourceStorageSettings() {
   const disabled = isLoading || isSaving || isMigrating;
 
   return (
-    <div className="mt-5 rounded-[10px] border border-border p-4 space-y-3">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h3 className="text-sm font-medium text-text">Resource Storage</h3>
-          <p className="text-sm text-text-muted mt-0.5">
-            Choose where new images and pasted resources are stored.
+    <section className="pb-2">
+      <div className="flex items-start justify-between gap-6">
+        <div className="flex flex-col gap-0.75">
+          <h2 className="text-xl font-medium">Resource Storage</h2>
+          <p className="text-sm text-text-muted max-w-lg">
+            Choose where new images and pasted resources are stored. Existing
+            references keep working until you choose to migrate them.
           </p>
         </div>
         {isLoading && (
@@ -859,7 +865,7 @@ function ResourceStorageSettings() {
         )}
       </div>
 
-      <div className="flex flex-wrap gap-1 p-1 rounded-[10px] border border-border w-fit">
+      <div className="mt-4 flex flex-wrap gap-1 p-1 rounded-[10px] border border-border w-fit">
         <Button
           onClick={() => handleChangeLocation("assets")}
           variant={location === "assets" ? "primary" : "ghost"}
@@ -878,10 +884,10 @@ function ResourceStorageSettings() {
         </Button>
       </div>
 
-      <div className="flex items-center justify-between gap-4 pt-1">
-        <p className="text-xs text-text-muted">
-          Existing references keep working. Migration updates old notes when
-          you choose to run it.
+      <div className="mt-3 flex items-center justify-between gap-4">
+        <p className="text-sm text-text-muted max-w-lg">
+          Migration copies existing resources to the selected location and
+          updates Markdown references.
         </p>
         <Button
           onClick={() => setMigrationDialogOpen(true)}
@@ -928,7 +934,7 @@ function ResourceStorageSettings() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </div>
+    </section>
   );
 }
 
