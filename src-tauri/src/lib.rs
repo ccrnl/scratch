@@ -96,6 +96,13 @@ pub enum TextDirection {
     Rtl,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ResourceStorageLocation {
+    Assets,
+    NoteFolder,
+}
+
 // App config (stored in app data directory - just the notes folder path)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
@@ -122,6 +129,8 @@ pub struct Settings {
     pub interface_zoom: Option<f32>,
     #[serde(rename = "sidebarWidth")]
     pub sidebar_width: Option<u32>,
+    #[serde(rename = "resourceStorageLocation")]
+    pub resource_storage_location: Option<ResourceStorageLocation>,
     #[serde(rename = "customEditorWidthPx")]
     pub custom_editor_width_px: Option<u32>,
     #[serde(rename = "ollamaModel")]
@@ -598,8 +607,16 @@ fn strip_markdown(text: &str) -> String {
     result.trim().to_string()
 }
 
+const ASSETS_DIR_NAME: &str = "assets";
+
 /// Directories to exclude from note discovery and ID resolution (app-internal, always excluded).
-const EXCLUDED_DIRS: &[&str] = &[".git", ".scratch", ".obsidian", ".trash", "assets"];
+const EXCLUDED_DIRS: &[&str] = &[
+    ".git",
+    ".scratch",
+    ".obsidian",
+    ".trash",
+    ASSETS_DIR_NAME,
+];
 
 /// Default user-configurable directories to ignore (common build/dependency folders).
 const DEFAULT_IGNORED_DIRS: &[&str] = &[
@@ -815,7 +832,7 @@ fn initialize_notes_folder(app: &AppHandle, path_buf: &PathBuf, state: &AppState
     }
 
     // Create assets folder
-    let assets = path_buf.join("assets");
+    let assets = path_buf.join(ASSETS_DIR_NAME);
     std::fs::create_dir_all(&assets).map_err(|e| e.to_string())?;
 
     // Create .scratch config folder
@@ -1277,7 +1294,13 @@ async fn create_note(target_folder: Option<String>, state: State<'_, AppState>) 
 }
 
 /// Validate a relative folder path against traversal attacks
-const RESERVED_FOLDER_NAMES: &[&str] = &[".git", ".scratch", ".obsidian", ".trash", "assets"];
+const RESERVED_FOLDER_NAMES: &[&str] = &[
+    ".git",
+    ".scratch",
+    ".obsidian",
+    ".trash",
+    ASSETS_DIR_NAME,
+];
 
 fn validate_folder_path(path: &str) -> Result<(), String> {
     if path.contains('\\') {
@@ -2279,9 +2302,110 @@ fn copy_to_clipboard(app: AppHandle, text: String) -> Result<(), String> {
     app.clipboard().write_text(text).map_err(|e| e.to_string())
 }
 
+fn effective_resource_storage_location(settings: &Settings) -> ResourceStorageLocation {
+    settings
+        .resource_storage_location
+        .clone()
+        .unwrap_or(ResourceStorageLocation::Assets)
+}
+
+fn get_note_parent_dir(notes_root: &Path, target_note_path: Option<&str>) -> Option<PathBuf> {
+    let note_path = PathBuf::from(target_note_path?);
+    if !is_markdown_extension(&note_path) {
+        return None;
+    }
+
+    let note_parent = note_path.parent()?;
+    let canonical_root = notes_root.canonicalize().ok()?;
+    let canonical_parent = note_parent.canonicalize().ok()?;
+    if canonical_parent.starts_with(canonical_root) {
+        Some(canonical_parent)
+    } else {
+        None
+    }
+}
+
+fn path_components(path: &Path) -> Vec<String> {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect()
+}
+
+fn relative_path_from(from_dir: &Path, to_path: &Path) -> String {
+    let from_components = path_components(from_dir);
+    let to_components = path_components(to_path);
+
+    let common_len = from_components
+        .iter()
+        .zip(to_components.iter())
+        .take_while(|(left, right)| left == right)
+        .count();
+
+    if common_len == 0 {
+        return to_path.to_string_lossy().replace('\\', "/");
+    }
+
+    let mut parts = Vec::new();
+    parts.extend((common_len..from_components.len()).map(|_| "..".to_string()));
+    parts.extend(to_components.iter().skip(common_len).cloned());
+
+    if parts.is_empty() {
+        ".".to_string()
+    } else {
+        parts.join("/")
+    }
+}
+
+struct ResourceTarget {
+    dir: PathBuf,
+    relative_from_note: Option<PathBuf>,
+}
+
+fn get_resource_target(
+    notes_root: &Path,
+    settings: &Settings,
+    target_note_path: Option<&str>,
+) -> ResourceTarget {
+    let note_parent = get_note_parent_dir(notes_root, target_note_path);
+    let storage_location = effective_resource_storage_location(settings);
+    let dir = match (&storage_location, &note_parent) {
+        (ResourceStorageLocation::NoteFolder, Some(parent)) => parent.clone(),
+        _ => notes_root.join(ASSETS_DIR_NAME),
+    };
+
+    ResourceTarget {
+        dir,
+        relative_from_note: note_parent,
+    }
+}
+
+fn unique_resource_path(dir: &Path, stem: &str, extension: &str) -> (String, PathBuf) {
+    let sanitized_stem = sanitize_filename(stem);
+    let mut target_name = format!("{}.{}", sanitized_stem, extension);
+    let mut counter = 1;
+    let mut target_path = dir.join(&target_name);
+
+    while target_path.exists() {
+        target_name = format!("{}-{}.{}", sanitized_stem, counter, extension);
+        target_path = dir.join(&target_name);
+        counter += 1;
+    }
+
+    (target_name, target_path)
+}
+
+fn resource_markdown_path(notes_root: &Path, target: &ResourceTarget, target_path: &Path) -> String {
+    if let Some(note_parent) = &target.relative_from_note {
+        relative_path_from(note_parent, target_path)
+    } else {
+        relative_path_from(notes_root, target_path)
+    }
+}
+
 #[tauri::command]
 async fn save_clipboard_image(
     base64_data: String,
+    target_note_path: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     // Guard against empty clipboard payload
@@ -2289,13 +2413,16 @@ async fn save_clipboard_image(
         return Err("Clipboard data is empty".to_string());
     }
 
-    let folder = {
+    let (folder, settings) = {
         let app_config = state.app_config.read().expect("app_config read lock");
-        app_config
+        let folder = app_config
             .notes_folder
             .clone()
-            .ok_or("Notes folder not set")?
+            .ok_or("Notes folder not set")?;
+        let settings = state.settings.read().expect("settings read lock").clone();
+        (folder, settings)
     };
+    let notes_root = PathBuf::from(&folder);
 
     // Decode base64
     let image_data = base64::engine::general_purpose::STANDARD
@@ -2307,9 +2434,8 @@ async fn save_clipboard_image(
         return Err("Decoded image data is empty".to_string());
     }
 
-    // Create assets folder path
-    let assets_dir = PathBuf::from(&folder).join("assets");
-    fs::create_dir_all(&assets_dir)
+    let target = get_resource_target(&notes_root, &settings, target_note_path.as_deref());
+    fs::create_dir_all(&target.dir)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -2319,37 +2445,37 @@ async fn save_clipboard_image(
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    let mut target_name = format!("screenshot-{}.png", timestamp);
-    let mut counter = 1;
-    let mut target_path = assets_dir.join(&target_name);
-
-    while target_path.exists() {
-        target_name = format!("screenshot-{}-{}.png", timestamp, counter);
-        target_path = assets_dir.join(&target_name);
-        counter += 1;
-    }
+    let (target_name, target_path) =
+        unique_resource_path(&target.dir, &format!("screenshot-{}", timestamp), "png");
 
     // Write the file
     fs::write(&target_path, &image_data)
         .await
         .map_err(|_| "Failed to write image".to_string())?;
 
-    // Return relative path
-    Ok(format!("assets/{}", target_name))
+    Ok(resource_markdown_path(
+        &notes_root,
+        &target,
+        &target.dir.join(target_name),
+    ))
 }
 
 #[tauri::command]
-async fn copy_image_to_assets(
+async fn copy_image_to_resources(
     source_path: String,
+    target_note_path: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let folder = {
+    let (folder, settings) = {
         let app_config = state.app_config.read().expect("app_config read lock");
-        app_config
+        let folder = app_config
             .notes_folder
             .clone()
-            .ok_or("Notes folder not set")?
+            .ok_or("Notes folder not set")?;
+        let settings = state.settings.read().expect("settings read lock").clone();
+        (folder, settings)
     };
+    let notes_root = PathBuf::from(&folder);
 
     let source = PathBuf::from(&source_path);
     if !source.exists() {
@@ -2379,30 +2505,328 @@ async fn copy_image_to_assets(
     // Sanitize the filename
     let sanitized_name = sanitize_filename(original_name);
 
-    // Create assets folder path
-    let assets_dir = PathBuf::from(&folder).join("assets");
-    fs::create_dir_all(&assets_dir)
+    let target = get_resource_target(&notes_root, &settings, target_note_path.as_deref());
+    fs::create_dir_all(&target.dir)
         .await
         .map_err(|e| e.to_string())?;
 
     // Generate unique filename
-    let mut target_name = format!("{}.{}", sanitized_name, extension);
-    let mut counter = 1;
-    let mut target_path = assets_dir.join(&target_name);
-
-    while target_path.exists() {
-        target_name = format!("{}-{}.{}", sanitized_name, counter, extension);
-        target_path = assets_dir.join(&target_name);
-        counter += 1;
-    }
+    let (target_name, target_path) = unique_resource_path(&target.dir, &sanitized_name, extension);
 
     // Copy the file
     fs::copy(&source, &target_path)
         .await
         .map_err(|_| "Failed to copy image".to_string())?;
 
-    // Return both relative path and filename for frontend to construct the URL
-    Ok(format!("assets/{}", target_name))
+    Ok(resource_markdown_path(
+        &notes_root,
+        &target,
+        &target.dir.join(target_name),
+    ))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceMigrationResult {
+    pub notes_scanned: usize,
+    pub notes_updated: usize,
+    pub resources_copied: usize,
+    pub references_updated: usize,
+    pub references_skipped: usize,
+}
+
+struct ResourceMigrationContext {
+    notes_root: PathBuf,
+    target_location: ResourceStorageLocation,
+    copied_resources: HashMap<(PathBuf, PathBuf), PathBuf>,
+    result: ResourceMigrationResult,
+}
+
+fn decode_resource_src(src: &str) -> String {
+    urlencoding::decode(src)
+        .map(|decoded| decoded.into_owned())
+        .unwrap_or_else(|_| src.to_string())
+}
+
+fn is_external_resource_src(src: &str) -> bool {
+    let trimmed = src.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("//") {
+        return true;
+    }
+    if trimmed.starts_with("file://") {
+        return false;
+    }
+    let chars: Vec<char> = trimmed.chars().collect();
+    if chars.len() >= 3
+        && chars[0].is_ascii_alphabetic()
+        && chars[1] == ':'
+        && (chars[2] == '/' || chars[2] == '\\')
+    {
+        return false;
+    }
+    if let Some(colon_index) = trimmed.find(':') {
+        let scheme = &trimmed[..colon_index];
+        if !scheme.is_empty()
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
+            && scheme
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_alphabetic())
+                .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn strip_markdown_resource_wrapping(src: &str) -> &str {
+    let trimmed = src.trim();
+    trimmed
+        .strip_prefix('<')
+        .and_then(|s| s.strip_suffix('>'))
+        .unwrap_or(trimmed)
+}
+
+fn resolve_resource_src(src: &str, note_dir: &Path) -> Option<PathBuf> {
+    let stripped = strip_markdown_resource_wrapping(src);
+    if is_external_resource_src(stripped) {
+        return None;
+    }
+
+    let decoded = decode_resource_src(stripped);
+    if decoded.starts_with("file://") {
+        let url = url::Url::parse(&decoded).ok()?;
+        return url.to_file_path().ok();
+    }
+
+    let path = PathBuf::from(&decoded);
+    if path.is_absolute() {
+        Some(path)
+    } else {
+        Some(note_dir.join(path))
+    }
+}
+
+fn canonical_path(path: &Path) -> Option<PathBuf> {
+    path.canonicalize().ok()
+}
+
+fn canonical_starts_with(path: &Path, base: &Path) -> bool {
+    match (canonical_path(path), canonical_path(base)) {
+        (Some(path), Some(base)) => path.starts_with(base),
+        _ => false,
+    }
+}
+
+fn unique_resource_path_blocking(dir: &Path, source: &Path) -> Option<PathBuf> {
+    let extension = source.extension()?.to_str()?;
+    let stem = source.file_stem().and_then(|name| name.to_str()).unwrap_or("image");
+    let (_, target_path) = unique_resource_path(dir, stem, extension);
+    Some(target_path)
+}
+
+fn migrate_resource_src(
+    src: &str,
+    note_dir: &Path,
+    context: &mut ResourceMigrationContext,
+) -> Option<String> {
+    let source = resolve_resource_src(src, note_dir)?;
+    if !source.exists() || !source.is_file() {
+        context.result.references_skipped += 1;
+        return None;
+    }
+    if !canonical_starts_with(&source, &context.notes_root) {
+        context.result.references_skipped += 1;
+        return None;
+    }
+
+    let assets_dir = context.notes_root.join(ASSETS_DIR_NAME);
+    let source_in_assets = canonical_starts_with(&source, &assets_dir);
+    let target_dir = match context.target_location {
+        ResourceStorageLocation::Assets => {
+            if source_in_assets {
+                return None;
+            }
+            assets_dir
+        }
+        ResourceStorageLocation::NoteFolder => {
+            if canonical_starts_with(&source, note_dir)
+                && source
+                    .parent()
+                    .and_then(canonical_path)
+                    .zip(canonical_path(note_dir))
+                    .map(|(source_parent, note_dir)| source_parent == note_dir)
+                    .unwrap_or(false)
+            {
+                return None;
+            }
+            note_dir.to_path_buf()
+        }
+    };
+
+    std::fs::create_dir_all(&target_dir).ok()?;
+    let canonical_source = canonical_path(&source)?;
+    let canonical_target_dir = canonical_path(&target_dir)?;
+    let cache_key = (canonical_source.clone(), canonical_target_dir.clone());
+
+    let target_path = if let Some(existing) = context.copied_resources.get(&cache_key) {
+        existing.clone()
+    } else {
+        let target_path = unique_resource_path_blocking(&target_dir, &source)?;
+        std::fs::copy(&canonical_source, &target_path).ok()?;
+        context
+            .copied_resources
+            .insert(cache_key, target_path.clone());
+        context.result.resources_copied += 1;
+        target_path
+    };
+
+    context.result.references_updated += 1;
+    Some(relative_path_from(note_dir, &target_path))
+}
+
+fn rewrite_markdown_resource_links(
+    content: &str,
+    note_dir: &Path,
+    context: &mut ResourceMigrationContext,
+) -> String {
+    let image_re = regex::Regex::new(r"!\[([^\]]*)\]\(([^)]+)\)")
+        .expect("valid markdown image regex");
+    let mut rewritten = String::with_capacity(content.len());
+    let mut last = 0;
+
+    for captures in image_re.captures_iter(content) {
+        let Some(full_match) = captures.get(0) else {
+            continue;
+        };
+        rewritten.push_str(&content[last..full_match.start()]);
+
+        let alt = captures.get(1).map(|m| m.as_str()).unwrap_or("");
+        let src = captures.get(2).map(|m| m.as_str()).unwrap_or("");
+        if let Some(new_src) = migrate_resource_src(src, note_dir, context) {
+            rewritten.push_str(&format!("![{}]({})", alt, new_src));
+        } else {
+            rewritten.push_str(full_match.as_str());
+        }
+        last = full_match.end();
+    }
+    rewritten.push_str(&content[last..]);
+    rewritten
+}
+
+fn rewrite_html_resource_links_with_quote(
+    content: &str,
+    note_dir: &Path,
+    context: &mut ResourceMigrationContext,
+    quote: char,
+) -> String {
+    let pattern = if quote == '"' {
+        r#"(?is)<img\b([^>]*?)\bsrc\s*=\s*"([^"]*)"([^>]*)>"#
+    } else {
+        r#"(?is)<img\b([^>]*?)\bsrc\s*=\s*'([^']*)'([^>]*)>"#
+    };
+    let image_re = regex::Regex::new(pattern).expect("valid html image regex");
+    let mut rewritten = String::with_capacity(content.len());
+    let mut last = 0;
+
+    for captures in image_re.captures_iter(content) {
+        let Some(full_match) = captures.get(0) else {
+            continue;
+        };
+        rewritten.push_str(&content[last..full_match.start()]);
+
+        let before_src = captures.get(1).map(|m| m.as_str()).unwrap_or("");
+        let src = captures.get(2).map(|m| m.as_str()).unwrap_or("");
+        let after_src = captures.get(3).map(|m| m.as_str()).unwrap_or("");
+
+        if let Some(new_src) = migrate_resource_src(src, note_dir, context) {
+            rewritten.push_str(&format!(
+                "<img{}src={}{}{}{}>",
+                before_src, quote, new_src, quote, after_src
+            ));
+        } else {
+            rewritten.push_str(full_match.as_str());
+        }
+        last = full_match.end();
+    }
+    rewritten.push_str(&content[last..]);
+    rewritten
+}
+
+fn rewrite_html_resource_links(
+    content: &str,
+    note_dir: &Path,
+    context: &mut ResourceMigrationContext,
+) -> String {
+    let rewritten = rewrite_html_resource_links_with_quote(content, note_dir, context, '"');
+    rewrite_html_resource_links_with_quote(&rewritten, note_dir, context, '\'')
+}
+
+fn migrate_resource_storage_blocking(
+    notes_root: PathBuf,
+    ignored_dirs: Vec<String>,
+    target_location: ResourceStorageLocation,
+) -> Result<ResourceMigrationResult, String> {
+    use walkdir::WalkDir;
+
+    let mut context = ResourceMigrationContext {
+        notes_root: notes_root.clone(),
+        target_location,
+        copied_resources: HashMap::new(),
+        result: ResourceMigrationResult::default(),
+    };
+
+    for entry in WalkDir::new(&notes_root)
+        .into_iter()
+        .filter_entry(|entry| is_visible_notes_entry(entry, &ignored_dirs))
+        .filter_map(|entry| entry.ok())
+    {
+        let path = entry.path();
+        if !entry.file_type().is_file() || !is_markdown_extension(path) {
+            continue;
+        }
+
+        context.result.notes_scanned += 1;
+        let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let note_dir = path.parent().unwrap_or(&notes_root);
+        let rewritten = rewrite_html_resource_links(
+            &rewrite_markdown_resource_links(&content, note_dir, &mut context),
+            note_dir,
+            &mut context,
+        );
+
+        if rewritten != content {
+            std::fs::write(path, rewritten).map_err(|e| e.to_string())?;
+            context.result.notes_updated += 1;
+        }
+    }
+
+    Ok(context.result)
+}
+
+#[tauri::command]
+async fn migrate_resource_storage(
+    target_location: ResourceStorageLocation,
+    state: State<'_, AppState>,
+) -> Result<ResourceMigrationResult, String> {
+    let (folder, ignored_dirs) = {
+        let app_config = state.app_config.read().expect("app_config read lock");
+        let folder = app_config
+            .notes_folder
+            .clone()
+            .ok_or("Notes folder not set")?;
+        let settings = state.settings.read().expect("settings read lock");
+        (folder, get_effective_ignored_dirs(&settings))
+    };
+
+    tokio::task::spawn_blocking(move || {
+        migrate_resource_storage_blocking(PathBuf::from(folder), ignored_dirs, target_location)
+    })
+    .await
+    .map_err(|e| format!("Migration task failed: {}", e))?
 }
 
 #[tauri::command]
@@ -3557,6 +3981,77 @@ fn is_markdown_extension(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_dir(name: &str) -> PathBuf {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("scratch-{}-{}", name, timestamp))
+    }
+
+    #[test]
+    fn migrates_assets_resources_to_note_folder() {
+        let root = test_dir("assets-to-note-folder");
+        let assets = root.join(ASSETS_DIR_NAME);
+        let note_dir = root.join("Folder");
+        std::fs::create_dir_all(&assets).expect("create assets dir");
+        std::fs::create_dir_all(&note_dir).expect("create note dir");
+        std::fs::write(assets.join("a.png"), b"png").expect("write asset");
+        std::fs::write(assets.join("b.jpg"), b"jpg").expect("write asset");
+        let note_path = note_dir.join("Note.md");
+        std::fs::write(
+            &note_path,
+            "![a](../assets/a.png)\n<img src=\"../assets/b.jpg\" alt=\"b\" />",
+        )
+        .expect("write note");
+
+        let result = migrate_resource_storage_blocking(
+            root.clone(),
+            vec![],
+            ResourceStorageLocation::NoteFolder,
+        )
+        .expect("migration succeeds");
+
+        let content = std::fs::read_to_string(&note_path).expect("read note");
+        assert!(content.contains("![a](a.png)"));
+        assert!(content.contains("<img src=\"b.jpg\" alt=\"b\" />"));
+        assert!(note_dir.join("a.png").exists());
+        assert!(note_dir.join("b.jpg").exists());
+        assert_eq!(result.notes_updated, 1);
+        assert_eq!(result.resources_copied, 2);
+        assert_eq!(result.references_updated, 2);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn migrates_note_folder_resources_to_assets() {
+        let root = test_dir("note-folder-to-assets");
+        let note_dir = root.join("Folder");
+        std::fs::create_dir_all(&note_dir).expect("create note dir");
+        std::fs::write(note_dir.join("a.png"), b"png").expect("write image");
+        let note_path = note_dir.join("Note.md");
+        std::fs::write(&note_path, "![a](a.png)").expect("write note");
+
+        let result =
+            migrate_resource_storage_blocking(root.clone(), vec![], ResourceStorageLocation::Assets)
+                .expect("migration succeeds");
+
+        let content = std::fs::read_to_string(&note_path).expect("read note");
+        assert_eq!(content, "![a](../assets/a.png)");
+        assert!(root.join(ASSETS_DIR_NAME).join("a.png").exists());
+        assert_eq!(result.notes_updated, 1);
+        assert_eq!(result.resources_copied, 1);
+        assert_eq!(result.references_updated, 1);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
 // Preview mode: create a lightweight window for editing a single file
 fn create_preview_window(app: &AppHandle, file_path: &str) -> Result<(), String> {
     use std::collections::hash_map::DefaultHasher;
@@ -3832,8 +4327,9 @@ pub fn run() {
             rebuild_search_index,
             get_default_ignored_patterns,
             copy_to_clipboard,
-            copy_image_to_assets,
+            copy_image_to_resources,
             save_clipboard_image,
+            migrate_resource_storage,
             open_folder_dialog,
             open_in_file_manager,
             open_url_safe,

@@ -4,8 +4,18 @@ import { toast } from "sonner";
 import { useNotes } from "../../context/NotesContext";
 import { useTheme } from "../../context/ThemeContext";
 import { useGit } from "../../context/GitContext";
-import { Button } from "../ui";
-import { Input } from "../ui";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  Button,
+  Input,
+} from "../ui";
 import {
   FolderIcon,
   FoldersIcon,
@@ -15,7 +25,17 @@ import {
   ChevronRightIcon,
   XIcon,
 } from "../icons";
-import type { Settings } from "../../types/note";
+import type { ResourceStorageLocation, Settings } from "../../types/note";
+
+const DEFAULT_RESOURCE_STORAGE_LOCATION: ResourceStorageLocation = "assets";
+
+interface ResourceMigrationResult {
+  notesScanned: number;
+  notesUpdated: number;
+  resourcesCopied: number;
+  referencesUpdated: number;
+  referencesSkipped: number;
+}
 
 // Format remote URL for display - extract user/repo from full URL
 function formatRemoteUrl(url: string | null): string {
@@ -282,6 +302,7 @@ export function GeneralSettingsSection() {
             </Button>
           )}
         </div>
+        <ResourceStorageSettings />
       </section>
 
       {/* Divider */}
@@ -745,6 +766,168 @@ export function GeneralSettingsSection() {
         </p>
         <IgnoredFoldersEditor />
       </section>
+    </div>
+  );
+}
+
+function ResourceStorageSettings() {
+  const { notesFolder, refreshNotes, reloadCurrentNote } = useNotes();
+  const [location, setLocation] =
+    useState<ResourceStorageLocation>(DEFAULT_RESOURCE_STORAGE_LOCATION);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isMigrating, setIsMigrating] = useState(false);
+  const [migrationDialogOpen, setMigrationDialogOpen] = useState(false);
+
+  useEffect(() => {
+    setIsLoading(true);
+    invoke<Settings>("get_settings")
+      .then((settings) => {
+        setLocation(
+          settings.resourceStorageLocation ?? DEFAULT_RESOURCE_STORAGE_LOCATION,
+        );
+      })
+      .catch((error) => {
+        console.error("Failed to load resource storage setting:", error);
+        setLocation(DEFAULT_RESOURCE_STORAGE_LOCATION);
+      })
+      .finally(() => setIsLoading(false));
+  }, [notesFolder]);
+
+  const handleChangeLocation = async (next: ResourceStorageLocation) => {
+    if (isSaving || next === location) return;
+    setIsSaving(true);
+    try {
+      const settings = await invoke<Settings>("get_settings");
+      await invoke("update_settings", {
+        newSettings: {
+          ...settings,
+          resourceStorageLocation: next,
+        },
+      });
+      setLocation(next);
+      setMigrationDialogOpen(true);
+      toast.success("Resource storage saved");
+    } catch (error) {
+      console.error("Failed to save resource storage setting:", error);
+      toast.error("Failed to save resource storage");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleMigrate = async () => {
+    if (isMigrating) return;
+    setIsMigrating(true);
+    try {
+      const result = await invoke<ResourceMigrationResult>(
+        "migrate_resource_storage",
+        { targetLocation: location },
+      );
+      setMigrationDialogOpen(false);
+      await refreshNotes();
+      await reloadCurrentNote();
+      toast.success(
+        `Migrated ${result.notesUpdated} note${result.notesUpdated === 1 ? "" : "s"} and ${result.referencesUpdated} reference${result.referencesUpdated === 1 ? "" : "s"}`,
+      );
+      if (result.referencesSkipped > 0) {
+        toast.info(
+          `${result.referencesSkipped} reference${result.referencesSkipped === 1 ? "" : "s"} could not be migrated`,
+        );
+      }
+    } catch (error) {
+      console.error("Failed to migrate resources:", error);
+      toast.error("Failed to migrate resources");
+    } finally {
+      setIsMigrating(false);
+    }
+  };
+
+  const disabled = isLoading || isSaving || isMigrating;
+
+  return (
+    <div className="mt-5 rounded-[10px] border border-border p-4 space-y-3">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h3 className="text-sm font-medium text-text">Resource Storage</h3>
+          <p className="text-sm text-text-muted mt-0.5">
+            Choose where new images and pasted resources are stored.
+          </p>
+        </div>
+        {isLoading && (
+          <SpinnerIcon className="w-4 h-4 stroke-[1.5] animate-spin text-text-muted shrink-0 mt-0.5" />
+        )}
+      </div>
+
+      <div className="flex flex-wrap gap-1 p-1 rounded-[10px] border border-border w-fit">
+        <Button
+          onClick={() => handleChangeLocation("assets")}
+          variant={location === "assets" ? "primary" : "ghost"}
+          size="xs"
+          disabled={disabled}
+        >
+          /assets
+        </Button>
+        <Button
+          onClick={() => handleChangeLocation("note-folder")}
+          variant={location === "note-folder" ? "primary" : "ghost"}
+          size="xs"
+          disabled={disabled}
+        >
+          Same folder
+        </Button>
+      </div>
+
+      <div className="flex items-center justify-between gap-4 pt-1">
+        <p className="text-xs text-text-muted">
+          Existing references keep working. Migration updates old notes when
+          you choose to run it.
+        </p>
+        <Button
+          onClick={() => setMigrationDialogOpen(true)}
+          variant="outline"
+          size="sm"
+          disabled={disabled}
+          className="shrink-0"
+        >
+          Migrate Existing Notes
+        </Button>
+      </div>
+
+      <AlertDialog
+        open={migrationDialogOpen}
+        onOpenChange={setMigrationDialogOpen}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Migrate existing resources?</AlertDialogTitle>
+            <AlertDialogDescription>
+              New images will use the selected storage location from now on.
+              Migration copies existing resources to that location and rewrites
+              the Markdown references. Original files are left in place.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isMigrating}>Later</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault();
+                void handleMigrate();
+              }}
+              disabled={isMigrating}
+            >
+              {isMigrating ? (
+                <>
+                  <SpinnerIcon className="w-3.5 h-3.5 mr-2 animate-spin" />
+                  Migrating...
+                </>
+              ) : (
+                "Migrate Notes"
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
