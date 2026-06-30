@@ -55,6 +55,7 @@ export interface Settings {
   customEditorWidthPx?: number;
   defaultNoteName?: string;
   interfaceZoom?: number;
+  sidebarWidth?: number;
   ollamaModel?: string;
   ignoredPatterns?: string[];
   customColorsLight?: CustomColors;

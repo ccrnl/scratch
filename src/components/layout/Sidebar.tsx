@@ -29,9 +29,25 @@ import { FolderNameDialog } from "../notes/FolderNameDialog";
 
 interface SidebarProps {
   onOpenSettings?: () => void;
+  width: number;
+  defaultWidth: number;
+  minWidth: number;
+  maxWidth: number;
+  onWidthChange: (width: number) => void;
+  onWidthCommit: (width: number) => void;
+  onResizeActiveChange: (active: boolean) => void;
 }
 
-export function Sidebar({ onOpenSettings }: SidebarProps) {
+export function Sidebar({
+  onOpenSettings,
+  width,
+  defaultWidth,
+  minWidth,
+  maxWidth,
+  onWidthChange,
+  onWidthCommit,
+  onResizeActiveChange,
+}: SidebarProps) {
   const {
     createNote,
     createFolder,
@@ -51,12 +67,162 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
   const [foldersEnabled, setFoldersEnabled] = useState(true);
   const [dragLabel, setDragLabel] = useState<string | null>(null);
   const [dragCount, setDragCount] = useState(1);
-  const [multiSelectedNoteIds, setMultiSelectedNoteIds] = useState<Set<string>>(new Set());
-  const [lastClickedNoteId, setLastClickedNoteId] = useState<string | null>(null);
+  const [multiSelectedNoteIds, setMultiSelectedNoteIds] = useState<Set<string>>(
+    new Set(),
+  );
+  const [lastClickedNoteId, setLastClickedNoteId] = useState<string | null>(
+    null,
+  );
   const debounceRef = useRef<number | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
-  const multiSelectedRef = useRef(multiSelectedNoteIds) as RefObject<Set<string>>;
+  const multiSelectedRef = useRef(
+    multiSelectedNoteIds,
+  ) as RefObject<Set<string>>;
+  const resizeStartRef = useRef<{
+    pointerId: number;
+    x: number;
+    width: number;
+  } | null>(null);
+  const bodyStyleRef = useRef<{
+    cursor: string;
+    userSelect: string;
+  } | null>(null);
   multiSelectedRef.current = multiSelectedNoteIds;
+
+  const clampWidth = useCallback(
+    (nextWidth: number) =>
+      Math.min(Math.max(Math.round(nextWidth), minWidth), maxWidth),
+    [maxWidth, minWidth],
+  );
+
+  const getResizeWidth = useCallback(
+    (clientX: number) => {
+      const resizeStart = resizeStartRef.current;
+      if (!resizeStart) return clampWidth(width);
+      return clampWidth(resizeStart.width + clientX - resizeStart.x);
+    },
+    [clampWidth, width],
+  );
+
+  const restoreResizeStyles = useCallback(() => {
+    if (!bodyStyleRef.current) return;
+    document.body.style.cursor = bodyStyleRef.current.cursor;
+    document.body.style.userSelect = bodyStyleRef.current.userSelect;
+    bodyStyleRef.current = null;
+  }, []);
+
+  const finishResize = useCallback(
+    (clientX: number) => {
+      if (!resizeStartRef.current) return;
+      const nextWidth = getResizeWidth(clientX);
+      resizeStartRef.current = null;
+      restoreResizeStyles();
+      onResizeActiveChange(false);
+      onWidthChange(nextWidth);
+      onWidthCommit(nextWidth);
+    },
+    [
+      getResizeWidth,
+      onResizeActiveChange,
+      onWidthChange,
+      onWidthCommit,
+      restoreResizeStyles,
+    ],
+  );
+
+  const handleResizePointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+
+      resizeStartRef.current = {
+        pointerId: e.pointerId,
+        x: e.clientX,
+        width,
+      };
+      bodyStyleRef.current = {
+        cursor: document.body.style.cursor,
+        userSelect: document.body.style.userSelect,
+      };
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+      onResizeActiveChange(true);
+      e.currentTarget.setPointerCapture(e.pointerId);
+    },
+    [onResizeActiveChange, width],
+  );
+
+  const handleResizePointerMove = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (!resizeStartRef.current) return;
+      e.preventDefault();
+      e.stopPropagation();
+      onWidthChange(getResizeWidth(e.clientX));
+    },
+    [getResizeWidth, onWidthChange],
+  );
+
+  const handleResizePointerUp = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (resizeStartRef.current?.pointerId !== e.pointerId) return;
+      e.preventDefault();
+      e.stopPropagation();
+      try {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      } catch {
+        // Pointer capture may already be released by the browser.
+      }
+      finishResize(e.clientX);
+    },
+    [finishResize],
+  );
+
+  const handleResizePointerCancel = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (resizeStartRef.current?.pointerId !== e.pointerId) return;
+      resizeStartRef.current = null;
+      restoreResizeStyles();
+      onResizeActiveChange(false);
+    },
+    [onResizeActiveChange, restoreResizeStyles],
+  );
+
+  const handleResizeDoubleClick = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      e.stopPropagation();
+      onWidthChange(defaultWidth);
+      onWidthCommit(defaultWidth);
+    },
+    [defaultWidth, onWidthChange, onWidthCommit],
+  );
+
+  const handleResizeKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLDivElement>) => {
+      const step = e.shiftKey ? 40 : 16;
+      let nextWidth: number | null = null;
+      if (e.key === "ArrowLeft") nextWidth = width - step;
+      if (e.key === "ArrowRight") nextWidth = width + step;
+      if (e.key === "Home") nextWidth = minWidth;
+      if (e.key === "End") nextWidth = maxWidth;
+      if (nextWidth == null) return;
+
+      e.preventDefault();
+      const clampedWidth = clampWidth(nextWidth);
+      onWidthChange(clampedWidth);
+      onWidthCommit(clampedWidth);
+    },
+    [clampWidth, maxWidth, minWidth, onWidthChange, onWidthCommit, width],
+  );
+
+  useEffect(() => {
+    return () => {
+      resizeStartRef.current = null;
+      restoreResizeStyles();
+      onResizeActiveChange(false);
+    };
+  }, [onResizeActiveChange, restoreResizeStyles]);
 
   // dnd-kit
   const sensors = useSensors(
@@ -310,7 +476,7 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
       onDragEnd={handleDragEnd}
       onDragCancel={() => setDragLabel(null)}
     >
-    <div className="relative w-64 h-full bg-bg-secondary border-r border-border flex flex-col select-none">
+    <div className="relative w-full h-full bg-bg-secondary border-r border-border flex flex-col select-none">
       {/* Drag region */}
       <div className="h-11 shrink-0" data-tauri-drag-region></div>
       <div className="flex items-center justify-between pl-4 pr-3 pb-2 border-b border-border shrink-0">
@@ -422,6 +588,26 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
 
       {/* Footer with git status, commit, and settings */}
       <Footer onOpenSettings={onOpenSettings} />
+
+      <div
+        role="separator"
+        aria-label="Resize notes sidebar"
+        aria-orientation="vertical"
+        aria-valuemin={minWidth}
+        aria-valuemax={maxWidth}
+        aria-valuenow={width}
+        tabIndex={0}
+        title="Resize sidebar"
+        onPointerDown={handleResizePointerDown}
+        onPointerMove={handleResizePointerMove}
+        onPointerUp={handleResizePointerUp}
+        onPointerCancel={handleResizePointerCancel}
+        onDoubleClick={handleResizeDoubleClick}
+        onKeyDown={handleResizeKeyDown}
+        className="group absolute top-0 right-0 z-30 h-full w-2 translate-x-1 cursor-col-resize touch-none outline-none"
+      >
+        <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-transparent transition-colors group-hover:bg-accent/30 group-focus-visible:bg-accent/50" />
+      </div>
 
       {/* Folder name dialog */}
       <FolderNameDialog
