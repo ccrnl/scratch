@@ -96,7 +96,7 @@ pub enum TextDirection {
     Rtl,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ResourceStorageLocation {
     Assets,
@@ -2305,7 +2305,6 @@ fn copy_to_clipboard(app: AppHandle, text: String) -> Result<(), String> {
 fn effective_resource_storage_location(settings: &Settings) -> ResourceStorageLocation {
     settings
         .resource_storage_location
-        .clone()
         .unwrap_or(ResourceStorageLocation::Assets)
 }
 
@@ -2493,7 +2492,7 @@ async fn copy_image_to_resources(
     ];
     let ext_lower = extension.to_lowercase();
     if !ALLOWED_IMAGE_EXTENSIONS.contains(&ext_lower.as_str()) {
-        return Err("Only image files can be copied to assets".to_string());
+        return Err("Only image files can be stored as resources".to_string());
     }
 
     // Get original filename (without extension)
@@ -2530,7 +2529,7 @@ async fn copy_image_to_resources(
 pub struct ResourceMigrationResult {
     pub notes_scanned: usize,
     pub notes_updated: usize,
-    pub resources_copied: usize,
+    pub resources_moved: usize,
     pub references_updated: usize,
     pub references_skipped: usize,
 }
@@ -2538,7 +2537,9 @@ pub struct ResourceMigrationResult {
 struct ResourceMigrationContext {
     notes_root: PathBuf,
     target_location: ResourceStorageLocation,
-    copied_resources: HashMap<(PathBuf, PathBuf), PathBuf>,
+    moved_resources: HashMap<(PathBuf, PathBuf), PathBuf>,
+    original_sources_to_remove: HashSet<PathBuf>,
+    ambiguous_sources: HashSet<PathBuf>,
     result: ResourceMigrationResult,
 }
 
@@ -2628,6 +2629,133 @@ fn unique_resource_path_blocking(dir: &Path, source: &Path) -> Option<PathBuf> {
     Some(target_path)
 }
 
+fn source_is_in_note_folder(source: &Path, note_dir: &Path) -> bool {
+    source
+        .parent()
+        .and_then(canonical_path)
+        .zip(canonical_path(note_dir))
+        .map(|(source_parent, note_dir)| source_parent == note_dir)
+        .unwrap_or(false)
+}
+
+fn resource_target_dir_for_migration(
+    source: &Path,
+    note_dir: &Path,
+    notes_root: &Path,
+    target_location: ResourceStorageLocation,
+) -> Option<PathBuf> {
+    let assets_dir = notes_root.join(ASSETS_DIR_NAME);
+    match target_location {
+        ResourceStorageLocation::Assets => {
+            if canonical_starts_with(source, &assets_dir) {
+                None
+            } else {
+                Some(assets_dir)
+            }
+        }
+        ResourceStorageLocation::NoteFolder => {
+            if source_is_in_note_folder(source, note_dir) {
+                None
+            } else {
+                Some(note_dir.to_path_buf())
+            }
+        }
+    }
+}
+
+fn resource_desired_target_dir(
+    note_dir: &Path,
+    notes_root: &Path,
+    target_location: ResourceStorageLocation,
+) -> PathBuf {
+    match target_location {
+        ResourceStorageLocation::Assets => notes_root.join(ASSETS_DIR_NAME),
+        ResourceStorageLocation::NoteFolder => note_dir.to_path_buf(),
+    }
+}
+
+fn resource_migration_target(
+    src: &str,
+    note_dir: &Path,
+    notes_root: &Path,
+    target_location: ResourceStorageLocation,
+) -> Option<(PathBuf, PathBuf)> {
+    let source = resolve_resource_src(src, note_dir)?;
+    if !source.exists() || !source.is_file() {
+        return None;
+    }
+    if !canonical_starts_with(&source, notes_root) {
+        return None;
+    }
+
+    let target_dir = resource_desired_target_dir(note_dir, notes_root, target_location);
+    let canonical_source = canonical_path(&source)?;
+    let target_dir = canonical_path(&target_dir).unwrap_or(target_dir);
+    Some((canonical_source, target_dir))
+}
+
+fn visit_markdown_resource_srcs<F: FnMut(&str)>(content: &str, visitor: &mut F) {
+    let image_re = regex::Regex::new(r"!\[([^\]]*)\]\(([^)]+)\)")
+        .expect("valid markdown image regex");
+    for captures in image_re.captures_iter(content) {
+        if let Some(src) = captures.get(2) {
+            visitor(src.as_str());
+        }
+    }
+}
+
+fn visit_html_resource_srcs_with_quote<F: FnMut(&str)>(
+    content: &str,
+    quote: char,
+    visitor: &mut F,
+) {
+    let pattern = if quote == '"' {
+        r#"(?is)<img\b([^>]*?)\bsrc\s*=\s*"([^"]*)"([^>]*)>"#
+    } else {
+        r#"(?is)<img\b([^>]*?)\bsrc\s*=\s*'([^']*)'([^>]*)>"#
+    };
+    let image_re = regex::Regex::new(pattern).expect("valid html image regex");
+    for captures in image_re.captures_iter(content) {
+        if let Some(src) = captures.get(2) {
+            visitor(src.as_str());
+        }
+    }
+}
+
+fn visit_resource_srcs<F: FnMut(&str)>(content: &str, mut visitor: F) {
+    visit_markdown_resource_srcs(content, &mut visitor);
+    visit_html_resource_srcs_with_quote(content, '"', &mut visitor);
+    visit_html_resource_srcs_with_quote(content, '\'', &mut visitor);
+}
+
+fn collect_ambiguous_resource_sources(
+    note_paths: &[PathBuf],
+    notes_root: &Path,
+    target_location: ResourceStorageLocation,
+) -> Result<HashSet<PathBuf>, String> {
+    let mut target_dirs_by_source: HashMap<PathBuf, HashSet<PathBuf>> = HashMap::new();
+
+    for path in note_paths {
+        let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let note_dir = path.parent().unwrap_or(notes_root);
+        visit_resource_srcs(&content, |src| {
+            if let Some((source, target_dir)) =
+                resource_migration_target(src, note_dir, notes_root, target_location)
+            {
+                target_dirs_by_source
+                    .entry(source)
+                    .or_default()
+                    .insert(target_dir);
+            }
+        });
+    }
+
+    Ok(target_dirs_by_source
+        .into_iter()
+        .filter_map(|(source, target_dirs)| (target_dirs.len() > 1).then_some(source))
+        .collect())
+}
+
 fn migrate_resource_src(
     src: &str,
     note_dir: &Path,
@@ -2643,44 +2771,34 @@ fn migrate_resource_src(
         return None;
     }
 
-    let assets_dir = context.notes_root.join(ASSETS_DIR_NAME);
-    let source_in_assets = canonical_starts_with(&source, &assets_dir);
-    let target_dir = match context.target_location {
-        ResourceStorageLocation::Assets => {
-            if source_in_assets {
-                return None;
-            }
-            assets_dir
-        }
-        ResourceStorageLocation::NoteFolder => {
-            if canonical_starts_with(&source, note_dir)
-                && source
-                    .parent()
-                    .and_then(canonical_path)
-                    .zip(canonical_path(note_dir))
-                    .map(|(source_parent, note_dir)| source_parent == note_dir)
-                    .unwrap_or(false)
-            {
-                return None;
-            }
-            note_dir.to_path_buf()
-        }
-    };
+    let target_dir = resource_target_dir_for_migration(
+        &source,
+        note_dir,
+        &context.notes_root,
+        context.target_location,
+    )?;
+    let canonical_source = canonical_path(&source)?;
+    if context.ambiguous_sources.contains(&canonical_source) {
+        context.result.references_skipped += 1;
+        return None;
+    }
 
     std::fs::create_dir_all(&target_dir).ok()?;
-    let canonical_source = canonical_path(&source)?;
     let canonical_target_dir = canonical_path(&target_dir)?;
     let cache_key = (canonical_source.clone(), canonical_target_dir.clone());
 
-    let target_path = if let Some(existing) = context.copied_resources.get(&cache_key) {
+    let target_path = if let Some(existing) = context.moved_resources.get(&cache_key) {
         existing.clone()
     } else {
         let target_path = unique_resource_path_blocking(&target_dir, &source)?;
         std::fs::copy(&canonical_source, &target_path).ok()?;
         context
-            .copied_resources
+            .moved_resources
             .insert(cache_key, target_path.clone());
-        context.result.resources_copied += 1;
+        context
+            .original_sources_to_remove
+            .insert(canonical_source.clone());
+        context.result.resources_moved += 1;
         target_path
     };
 
@@ -2772,25 +2890,28 @@ fn migrate_resource_storage_blocking(
 ) -> Result<ResourceMigrationResult, String> {
     use walkdir::WalkDir;
 
-    let mut context = ResourceMigrationContext {
-        notes_root: notes_root.clone(),
-        target_location,
-        copied_resources: HashMap::new(),
-        result: ResourceMigrationResult::default(),
-    };
-
-    for entry in WalkDir::new(&notes_root)
+    let note_paths: Vec<PathBuf> = WalkDir::new(&notes_root)
         .into_iter()
         .filter_entry(|entry| is_visible_notes_entry(entry, &ignored_dirs))
         .filter_map(|entry| entry.ok())
-    {
-        let path = entry.path();
-        if !entry.file_type().is_file() || !is_markdown_extension(path) {
-            continue;
-        }
+        .filter(|entry| entry.file_type().is_file() && is_markdown_extension(entry.path()))
+        .map(|entry| entry.path().to_path_buf())
+        .collect();
+    let ambiguous_sources =
+        collect_ambiguous_resource_sources(&note_paths, &notes_root, target_location)?;
 
+    let mut context = ResourceMigrationContext {
+        notes_root: notes_root.clone(),
+        target_location,
+        moved_resources: HashMap::new(),
+        original_sources_to_remove: HashSet::new(),
+        ambiguous_sources,
+        result: ResourceMigrationResult::default(),
+    };
+
+    for path in note_paths {
         context.result.notes_scanned += 1;
-        let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
         let note_dir = path.parent().unwrap_or(&notes_root);
         let rewritten = rewrite_html_resource_links(
             &rewrite_markdown_resource_links(&content, note_dir, &mut context),
@@ -2799,8 +2920,20 @@ fn migrate_resource_storage_blocking(
         );
 
         if rewritten != content {
-            std::fs::write(path, rewritten).map_err(|e| e.to_string())?;
+            std::fs::write(&path, rewritten).map_err(|e| e.to_string())?;
             context.result.notes_updated += 1;
+        }
+    }
+
+    for source in &context.original_sources_to_remove {
+        if source.exists() {
+            std::fs::remove_file(source).map_err(|e| {
+                format!(
+                    "Failed to remove migrated resource {}: {}",
+                    source.display(),
+                    e
+                )
+            })?;
         }
     }
 
@@ -4021,8 +4154,10 @@ mod tests {
         assert!(content.contains("<img src=\"b.jpg\" alt=\"b\" />"));
         assert!(note_dir.join("a.png").exists());
         assert!(note_dir.join("b.jpg").exists());
+        assert!(!assets.join("a.png").exists());
+        assert!(!assets.join("b.jpg").exists());
         assert_eq!(result.notes_updated, 1);
-        assert_eq!(result.resources_copied, 2);
+        assert_eq!(result.resources_moved, 2);
         assert_eq!(result.references_updated, 2);
 
         let _ = std::fs::remove_dir_all(root);
@@ -4044,9 +4179,91 @@ mod tests {
         let content = std::fs::read_to_string(&note_path).expect("read note");
         assert_eq!(content, "![a](../assets/a.png)");
         assert!(root.join(ASSETS_DIR_NAME).join("a.png").exists());
+        assert!(!note_dir.join("a.png").exists());
         assert_eq!(result.notes_updated, 1);
-        assert_eq!(result.resources_copied, 1);
+        assert_eq!(result.resources_moved, 1);
         assert_eq!(result.references_updated, 1);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn skips_shared_assets_when_note_folder_migration_would_duplicate() {
+        let root = test_dir("shared-assets-no-duplicates");
+        let assets = root.join(ASSETS_DIR_NAME);
+        let first_dir = root.join("First");
+        let second_dir = root.join("Second");
+        std::fs::create_dir_all(&assets).expect("create assets dir");
+        std::fs::create_dir_all(&first_dir).expect("create first dir");
+        std::fs::create_dir_all(&second_dir).expect("create second dir");
+        std::fs::write(assets.join("shared.png"), b"png").expect("write asset");
+        let first_note = first_dir.join("First.md");
+        let second_note = second_dir.join("Second.md");
+        std::fs::write(&first_note, "![shared](../assets/shared.png)").expect("write first note");
+        std::fs::write(&second_note, "![shared](../assets/shared.png)")
+            .expect("write second note");
+
+        let result = migrate_resource_storage_blocking(
+            root.clone(),
+            vec![],
+            ResourceStorageLocation::NoteFolder,
+        )
+        .expect("migration succeeds");
+
+        assert_eq!(
+            std::fs::read_to_string(&first_note).expect("read first note"),
+            "![shared](../assets/shared.png)"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&second_note).expect("read second note"),
+            "![shared](../assets/shared.png)"
+        );
+        assert!(assets.join("shared.png").exists());
+        assert!(!first_dir.join("shared.png").exists());
+        assert!(!second_dir.join("shared.png").exists());
+        assert_eq!(result.notes_updated, 0);
+        assert_eq!(result.resources_moved, 0);
+        assert_eq!(result.references_updated, 0);
+        assert_eq!(result.references_skipped, 2);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn keeps_note_folder_resource_when_shared_across_folders() {
+        let root = test_dir("shared-note-folder-resource");
+        let first_dir = root.join("First");
+        let second_dir = root.join("Second");
+        std::fs::create_dir_all(&first_dir).expect("create first dir");
+        std::fs::create_dir_all(&second_dir).expect("create second dir");
+        std::fs::write(first_dir.join("shared.png"), b"png").expect("write resource");
+        let first_note = first_dir.join("First.md");
+        let second_note = second_dir.join("Second.md");
+        std::fs::write(&first_note, "![shared](shared.png)").expect("write first note");
+        std::fs::write(&second_note, "![shared](../First/shared.png)")
+            .expect("write second note");
+
+        let result = migrate_resource_storage_blocking(
+            root.clone(),
+            vec![],
+            ResourceStorageLocation::NoteFolder,
+        )
+        .expect("migration succeeds");
+
+        assert_eq!(
+            std::fs::read_to_string(&first_note).expect("read first note"),
+            "![shared](shared.png)"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&second_note).expect("read second note"),
+            "![shared](../First/shared.png)"
+        );
+        assert!(first_dir.join("shared.png").exists());
+        assert!(!second_dir.join("shared.png").exists());
+        assert_eq!(result.notes_updated, 0);
+        assert_eq!(result.resources_moved, 0);
+        assert_eq!(result.references_updated, 0);
+        assert_eq!(result.references_skipped, 1);
 
         let _ = std::fs::remove_dir_all(root);
     }

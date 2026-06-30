@@ -32,7 +32,7 @@ const DEFAULT_RESOURCE_STORAGE_LOCATION: ResourceStorageLocation = "assets";
 interface ResourceMigrationResult {
   notesScanned: number;
   notesUpdated: number;
-  resourcesCopied: number;
+  resourcesMoved: number;
   referencesUpdated: number;
   referencesSkipped: number;
 }
@@ -886,8 +886,8 @@ function ResourceStorageSettings() {
 
       <div className="mt-3 flex items-center justify-between gap-4">
         <p className="text-sm text-text-muted max-w-lg">
-          Migration copies existing resources to the selected location and
-          updates Markdown references.
+          Migration moves existing resources to the selected location and
+          updates Markdown references without keeping duplicate files.
         </p>
         <Button
           onClick={() => setMigrationDialogOpen(true)}
@@ -909,8 +909,9 @@ function ResourceStorageSettings() {
             <AlertDialogTitle>Migrate existing resources?</AlertDialogTitle>
             <AlertDialogDescription>
               New images will use the selected storage location from now on.
-              Migration copies existing resources to that location and rewrites
-              the Markdown references. Original files are left in place.
+              Migration moves existing resources to that location and rewrites
+              the Markdown references. Shared resources that cannot be moved
+              without duplication are left unchanged.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
