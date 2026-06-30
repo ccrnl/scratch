@@ -56,6 +56,94 @@ function isAllowedUrlScheme(url: string): boolean {
     return false;
   }
 }
+
+const URL_SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
+const WINDOWS_ABSOLUTE_PATH_RE = /^[a-zA-Z]:[\\/]/;
+
+function dirname(path: string): string {
+  const index = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  return index >= 0 ? path.slice(0, index) : "";
+}
+
+function normalizeFilePath(path: string, separator: "/" | "\\"): string {
+  const normalized = path.replace(/[\\/]+/g, separator);
+  const isWindows = separator === "\\";
+  const windowsPrefix = isWindows
+    ? normalized.match(/^[a-zA-Z]:\\/)?.[0]
+    : null;
+  const prefix =
+    windowsPrefix ?? (normalized.startsWith(separator) ? separator : "");
+  const rest = prefix ? normalized.slice(prefix.length) : normalized;
+  const segments: string[] = [];
+
+  for (const segment of rest.split(separator)) {
+    if (!segment || segment === ".") continue;
+    if (segment === "..") {
+      if (segments.length > 0) segments.pop();
+      continue;
+    }
+    segments.push(segment);
+  }
+
+  return `${prefix}${segments.join(separator)}`;
+}
+
+function isRemoteOrAssetSrc(src: string): boolean {
+  if (WINDOWS_ABSOLUTE_PATH_RE.test(src)) return false;
+  if (src.startsWith("file://")) return false;
+  return URL_SCHEME_RE.test(src) || src.startsWith("//") || src.startsWith("#");
+}
+
+function decodeImagePath(src: string): string {
+  try {
+    return decodeURI(src);
+  } catch {
+    return src;
+  }
+}
+
+function resolveLocalImagePath(
+  src: string,
+  notePath: string | null,
+): string | null {
+  const trimmed = src.trim();
+  if (!trimmed || isRemoteOrAssetSrc(trimmed)) return null;
+
+  const decoded = decodeImagePath(trimmed);
+  if (decoded.startsWith("file://")) {
+    try {
+      const path = decodeImagePath(new URL(decoded).pathname);
+      if (/^\/[a-zA-Z]:\//.test(path)) {
+        return normalizeFilePath(path.slice(1), "\\");
+      }
+      return normalizeFilePath(path, "/");
+    } catch {
+      return null;
+    }
+  }
+
+  if (WINDOWS_ABSOLUTE_PATH_RE.test(decoded)) {
+    return normalizeFilePath(decoded, "\\");
+  }
+
+  if (decoded.startsWith("/")) {
+    return normalizeFilePath(decoded, "/");
+  }
+
+  if (!notePath) return null;
+
+  const separator: "/" | "\\" = notePath.includes("\\") ? "\\" : "/";
+  return normalizeFilePath(
+    `${dirname(notePath)}${separator}${decoded}`,
+    separator,
+  );
+}
+
+function resolveImageDisplaySrc(src: unknown, notePath: string | null): string {
+  const rawSrc = typeof src === "string" ? src : "";
+  const localPath = resolveLocalImagePath(rawSrc, notePath);
+  return localPath ? convertFileSrc(localPath) : rawSrc;
+}
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { Menu, MenuItem, PredefinedMenuItem } from "@tauri-apps/api/menu";
 import { useOptionalNotes } from "../../context/NotesContext";
@@ -588,6 +676,7 @@ export function Editor({
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<TiptapEditor | null>(null);
   const currentNoteIdRef = useRef<string | null>(null);
+  const currentNotePathRef = useRef<string | null>(null);
   // Track if we need to save (use ref to avoid computing markdown on every keystroke)
   const needsSaveRef = useRef(false);
   // Stable refs for wikilink click handler (avoids re-registering listener on every notes change)
@@ -598,6 +687,7 @@ export function Editor({
 
   // Keep ref in sync with current note ID
   currentNoteIdRef.current = currentNote?.id ?? null;
+  currentNotePathRef.current = currentNote?.path ?? null;
 
   // Get markdown from editor
   const getMarkdown = useCallback(
@@ -1092,7 +1182,20 @@ export function Editor({
           ];
         },
       }),
-      Image.configure({
+      Image.extend({
+        renderHTML({ HTMLAttributes }) {
+          return [
+            "img",
+            {
+              ...HTMLAttributes,
+              src: resolveImageDisplaySrc(
+                HTMLAttributes.src,
+                currentNotePathRef.current,
+              ),
+            },
+          ];
+        },
+      }).configure({
         inline: false,
         allowBase64: false,
       }),
