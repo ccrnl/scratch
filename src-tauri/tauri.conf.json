@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Scratch",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "identifier": "com.scratch.app",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -65,9 +65,9 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEE3RTQ2NTA4QzJGODdFRTYKUldUbWZ2akNDR1hrcDlud3VQSVhuYVU0cDk5V0RkaVFuVElRSGRVMjlFam9IdFVCNnU1ZlVJOXEK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlCRjAzQkI0NDAwNjQzRkMKUldUOFF3WkF0RHZ3bTBaUUJsZ0VDaHZLcWhpUHNBdkJDNEpjcEVvcUp2SUUyRGhTUEkvTnRnekMK",
       "endpoints": [
-        "https://github.com/erictli/scratch/releases/latest/download/latest.json"
+        "https://github.com/ccrnl/scratch/releases/latest/download/latest.json"
       ]
     }
   }
