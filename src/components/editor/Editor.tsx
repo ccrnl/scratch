@@ -150,7 +150,7 @@ import { useTheme } from "../../context/ThemeContext";
 import { Frontmatter } from "./Frontmatter";
 import { BlockMathEditor } from "./BlockMathEditor";
 import { LinkEditor } from "./LinkEditor";
-import { SearchToolbar } from "./SearchToolbar";
+import { SearchToolbar, type SearchOptions } from "./SearchToolbar";
 import { SlashCommand } from "./SlashCommand";
 import { Wikilink, type WikilinkStorage } from "./Wikilink";
 import { WikilinkSuggestion } from "./WikilinkSuggestion";
@@ -247,8 +247,108 @@ const katexMacros: Record<string, string> = {
 const searchHighlightPluginKey = new PluginKey("searchHighlight");
 
 interface SearchHighlightOptions {
-  matches: Array<{ from: number; to: number }>;
+  matches: SearchMatch[];
   currentIndex: number;
+}
+
+interface SearchMatch {
+  from: number;
+  to: number;
+  text: string;
+  captures: string[];
+  groups?: Record<string, string | undefined>;
+  prefix: string;
+  suffix: string;
+}
+
+interface SearchResult {
+  matches: SearchMatch[];
+  error: string | null;
+}
+
+const MAX_SEARCH_MATCHES = 500;
+const WORD_CHAR_RE = /[\p{L}\p{N}_]/u;
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function isWordChar(char: string | undefined): boolean {
+  return !!char && WORD_CHAR_RE.test(char);
+}
+
+function isWholeWordMatch(text: string, index: number, length: number): boolean {
+  const before = index > 0 ? text[index - 1] : undefined;
+  const after = index + length < text.length ? text[index + length] : undefined;
+  return !isWordChar(before) && !isWordChar(after);
+}
+
+function advanceRegexIndex(text: string, index: number): number {
+  if (index >= text.length) return index + 1;
+  const codePoint = text.codePointAt(index);
+  return index + (codePoint && codePoint > 0xffff ? 2 : 1);
+}
+
+function createSearchRegExp(
+  query: string,
+  options: SearchOptions,
+): { regex: RegExp | null; error: string | null } {
+  if (query.length === 0) {
+    return { regex: null, error: null };
+  }
+
+  const source = options.useRegex ? query : escapeRegExp(query);
+  const flags = `g${options.matchCase ? "" : "i"}u`;
+
+  try {
+    return { regex: new RegExp(source, flags), error: null };
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Invalid regular expression";
+    return { regex: null, error: message };
+  }
+}
+
+function expandRegexReplacement(
+  replacement: string,
+  match: SearchMatch,
+): string {
+  return replacement.replace(
+    /\$(\$|&|`|'|<[^>]+>|\d{1,2})/g,
+    (token, marker: string) => {
+      if (marker === "$") return "$";
+      if (marker === "&" || marker === "0") return match.text;
+      if (marker === "`") return match.prefix;
+      if (marker === "'") return match.suffix;
+
+      if (marker.startsWith("<") && marker.endsWith(">")) {
+        const name = marker.slice(1, -1);
+        return match.groups && name in match.groups
+          ? (match.groups[name] ?? "")
+          : token;
+      }
+
+      const captureIndex = Number(marker);
+      if (
+        Number.isInteger(captureIndex) &&
+        captureIndex > 0 &&
+        captureIndex <= match.captures.length
+      ) {
+        return match.captures[captureIndex - 1] ?? "";
+      }
+
+      return token;
+    },
+  );
+}
+
+function getReplacementText(
+  match: SearchMatch,
+  replacement: string,
+  options: SearchOptions,
+): string {
+  if (!options.useRegex) return replacement;
+  return expandRegexReplacement(replacement, match);
 }
 
 const SearchHighlight = Extension.create<SearchHighlightOptions>({
@@ -663,10 +763,15 @@ export function Editor({
   // Search state
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
-  const [searchMatches, setSearchMatches] = useState<
-    Array<{ from: number; to: number }>
-  >([]);
+  const [replaceQuery, setReplaceQuery] = useState("");
+  const [searchOptions, setSearchOptions] = useState<SearchOptions>({
+    matchCase: false,
+    wholeWord: false,
+    useRegex: false,
+  });
+  const [searchMatches, setSearchMatches] = useState<SearchMatch[]>([]);
   const [currentMatchIndex, setCurrentMatchIndex] = useState(0);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const saveTimeoutRef = useRef<number | null>(null);
   const linkPopupRef = useRef<TippyInstance | null>(null);
@@ -721,43 +826,72 @@ export function Editor({
   const isPinned =
     settings?.pinnedNoteIds?.includes(currentNote?.id || "") || false;
 
-  // Find all matches for search query (case-insensitive)
+  // Find all matches for search query
   const findMatches = useCallback(
-    (query: string, editorInstance: TiptapEditor | null) => {
-      if (!editorInstance || !query.trim()) return [];
+    (
+      query: string,
+      options: SearchOptions,
+      editorInstance: TiptapEditor | null,
+    ): SearchResult => {
+      if (!editorInstance || query.length === 0) {
+        return { matches: [], error: null };
+      }
+
+      const { regex, error } = createSearchRegExp(query, options);
+      if (error || !regex) {
+        return { matches: [], error };
+      }
 
       const doc = editorInstance.state.doc;
-      const lowerQuery = query.toLowerCase();
-      const matches: Array<{ from: number; to: number }> = [];
+      const matches: SearchMatch[] = [];
 
       // Search through each text node
       doc.descendants((node, nodePos) => {
         if (node.isText && node.text) {
           const text = node.text;
-          const lowerText = text.toLowerCase();
+          regex.lastIndex = 0;
 
-          let searchPos = 0;
-          while (searchPos < lowerText.length && matches.length < 500) {
-            const index = lowerText.indexOf(lowerQuery, searchPos);
-            if (index === -1) break;
+          let result: RegExpExecArray | null;
+          while (
+            matches.length < MAX_SEARCH_MATCHES &&
+            (result = regex.exec(text))
+          ) {
+            const matchText = result[0];
+            if (matchText.length === 0) {
+              regex.lastIndex = advanceRegexIndex(text, regex.lastIndex);
+              continue;
+            }
+
+            const index = result.index;
+            if (
+              options.wholeWord &&
+              !isWholeWordMatch(text, index, matchText.length)
+            ) {
+              continue;
+            }
 
             const matchFrom = nodePos + index;
-            const matchTo = matchFrom + query.length;
+            const matchTo = matchFrom + matchText.length;
 
             // Make sure the match doesn't extend beyond valid document bounds
             if (matchTo <= doc.content.size) {
               matches.push({
                 from: matchFrom,
                 to: matchTo,
+                text: matchText,
+                captures: result.slice(1).map((value) => value ?? ""),
+                groups: result.groups ? { ...result.groups } : undefined,
+                prefix: text.slice(0, index),
+                suffix: text.slice(index + matchText.length),
               });
             }
-
-            searchPos = index + 1;
           }
         }
+
+        return matches.length < MAX_SEARCH_MATCHES;
       });
 
-      return matches;
+      return { matches, error: null };
     },
     [],
   );
@@ -765,7 +899,7 @@ export function Editor({
   // Update search decorations - applies yellow backgrounds to all matches
   const updateSearchDecorations = useCallback(
     (
-      matches: Array<{ from: number; to: number }>,
+      matches: SearchMatch[],
       currentIndex: number,
       editorInstance: TiptapEditor | null,
     ) => {
@@ -1398,34 +1532,107 @@ export function Editor({
     updateSearchDecorations(searchMatches, prevIndex, editor);
   }, [searchMatches, currentMatchIndex, editor, updateSearchDecorations]);
 
+  const refreshSearchMatches = useCallback(
+    (preferredFrom = 0) => {
+      if (!editor) return;
+
+      if (searchQuery.length === 0) {
+        setSearchMatches([]);
+        setSearchError(null);
+        setCurrentMatchIndex(0);
+        updateSearchDecorations([], 0, editor);
+        return;
+      }
+
+      const result = findMatches(searchQuery, searchOptions, editor);
+      const nextIndex = result.matches.findIndex(
+        (match) => match.from >= preferredFrom,
+      );
+      const resolvedIndex =
+        result.matches.length === 0 ? 0 : nextIndex === -1 ? 0 : nextIndex;
+
+      setSearchMatches(result.matches);
+      setSearchError(result.error);
+      setCurrentMatchIndex(resolvedIndex);
+      updateSearchDecorations(result.matches, resolvedIndex, editor);
+    },
+    [
+      editor,
+      findMatches,
+      searchOptions,
+      searchQuery,
+      updateSearchDecorations,
+    ],
+  );
+
   // Handle search query change
   const handleSearchChange = useCallback((query: string) => {
     setSearchQuery(query);
   }, []);
 
+  const replaceSearchMatches = useCallback(
+    (matches: SearchMatch[], preferredFrom = 0) => {
+      if (!editor || matches.length === 0 || searchError) return;
+
+      const tr = editor.state.tr;
+      [...matches]
+        .sort((a, b) => b.from - a.from)
+        .forEach((match) => {
+          tr.insertText(
+            getReplacementText(match, replaceQuery, searchOptions),
+            match.from,
+            match.to,
+          );
+        });
+
+      if (!tr.docChanged) return;
+
+      editor.view.dispatch(tr.scrollIntoView());
+      editor.commands.focus();
+      requestAnimationFrame(() => refreshSearchMatches(preferredFrom));
+    },
+    [
+      editor,
+      refreshSearchMatches,
+      replaceQuery,
+      searchError,
+      searchOptions,
+    ],
+  );
+
+  const replaceCurrentMatch = useCallback(() => {
+    if (searchMatches.length === 0 || searchError) return;
+
+    const match = searchMatches[currentMatchIndex] ?? searchMatches[0];
+    const replacement = getReplacementText(match, replaceQuery, searchOptions);
+    replaceSearchMatches([match], match.from + replacement.length);
+  }, [
+    currentMatchIndex,
+    replaceQuery,
+    replaceSearchMatches,
+    searchError,
+    searchMatches,
+    searchOptions,
+  ]);
+
+  const replaceAllMatches = useCallback(() => {
+    if (searchMatches.length === 0 || searchError) return;
+    replaceSearchMatches(searchMatches, 0);
+  }, [replaceSearchMatches, searchError, searchMatches]);
+
   // Debounced search effect
   useEffect(() => {
-    if (!searchQuery.trim()) {
-      setSearchMatches([]);
-      setCurrentMatchIndex(0);
-      // Clear decorations when search is empty
-      if (editor) {
-        updateSearchDecorations([], 0, editor);
-      }
+    if (searchQuery.length === 0) {
+      refreshSearchMatches(0);
       return;
     }
 
     const timer = setTimeout(() => {
-      if (!editor) return;
-      const matches = findMatches(searchQuery, editor);
-      setSearchMatches(matches);
-      setCurrentMatchIndex(0);
-      // Always update decorations (clears old highlights when no matches)
-      updateSearchDecorations(matches, 0, editor);
+      refreshSearchMatches(0);
     }, 150);
 
     return () => clearTimeout(timer);
-  }, [searchQuery, editor, findMatches, updateSearchDecorations]);
+  }, [refreshSearchMatches, searchQuery]);
 
   // Handle clicks on wikilinks and external links
   useEffect(() => {
@@ -1894,7 +2101,9 @@ export function Editor({
     if (currentNote?.id) {
       setSearchOpen(false);
       setSearchQuery("");
+      setReplaceQuery("");
       setSearchMatches([]);
+      setSearchError(null);
       setCurrentMatchIndex(0);
       // Clear decorations
       if (editor) {
@@ -2499,13 +2708,21 @@ export function Editor({
                     <SearchToolbar
                       inputRef={searchInputRef}
                       query={searchQuery}
+                      replaceQuery={replaceQuery}
                       onChange={handleSearchChange}
+                      onReplaceChange={setReplaceQuery}
                       onNext={goToNextMatch}
                       onPrevious={goToPreviousMatch}
+                      onReplace={replaceCurrentMatch}
+                      onReplaceAll={replaceAllMatches}
+                      options={searchOptions}
+                      onOptionsChange={setSearchOptions}
                       onClose={() => {
                         setSearchOpen(false);
                         setSearchQuery("");
+                        setReplaceQuery("");
                         setSearchMatches([]);
+                        setSearchError(null);
                         setCurrentMatchIndex(0);
                         // Clear decorations and refocus editor
                         if (editor) {
@@ -2517,6 +2734,7 @@ export function Editor({
                         searchMatches.length === 0 ? 0 : currentMatchIndex + 1
                       }
                       totalMatches={searchMatches.length}
+                      error={searchError}
                     />
                   </div>
                 </div>
