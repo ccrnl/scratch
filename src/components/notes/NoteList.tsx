@@ -16,10 +16,12 @@ import {
 import { cleanTitle } from "../../lib/utils";
 import * as notesService from "../../services/notes";
 import { FolderTreeView } from "./FolderTreeView";
+import { MoveNoteDialog } from "./MoveNoteDialog";
 import {
   PinIcon,
   CopyIcon,
   TrashIcon,
+  FolderIcon,
 } from "../icons";
 import type { Settings } from "../../types/note";
 
@@ -70,8 +72,9 @@ interface NoteItemProps {
   preview?: string;
   modified: number;
   isSelected: boolean;
+  isMultiSelected: boolean;
   isPinned: boolean;
-  onSelect: (id: string) => void;
+  onSelect: (id: string, event: React.MouseEvent) => void;
   depth?: number;
   showFolderPrefix?: boolean;
 }
@@ -82,13 +85,17 @@ export const NoteItem = memo(function NoteItem({
   preview,
   modified,
   isSelected,
+  isMultiSelected,
   isPinned,
   onSelect,
   depth,
   showFolderPrefix = true,
 }: NoteItemProps) {
   const ref = useRef<HTMLDivElement>(null);
-  const handleClick = useCallback(() => onSelect(id), [onSelect, id]);
+  const handleClick = useCallback(
+    (event: React.MouseEvent) => onSelect(id, event),
+    [onSelect, id],
+  );
 
   useEffect(() => {
     if (isSelected) {
@@ -116,6 +123,7 @@ export const NoteItem = memo(function NoteItem({
         subtitle={displayPreview}
         meta={formatDate(modified)}
         isSelected={isSelected}
+        isMultiSelected={isMultiSelected}
         isPinned={isPinned}
         onClick={handleClick}
       />
@@ -130,12 +138,14 @@ interface NoteItemWithMenuProps {
   preview?: string;
   modified: number;
   isSelected: boolean;
+  isMultiSelected: boolean;
   isPinned: boolean;
-  onSelect: (id: string) => void;
+  onSelect: (id: string, event: React.MouseEvent) => void;
   onPin: (id: string) => Promise<void>;
   onUnpin: (id: string) => Promise<void>;
   onDuplicate: (id: string) => void;
   onDelete: (id: string) => void;
+  onMove: (id: string) => void;
   onRefreshSettings: () => Promise<void> | void;
 }
 
@@ -145,12 +155,14 @@ const NoteItemWithMenu = memo(function NoteItemWithMenu({
   preview,
   modified,
   isSelected,
+  isMultiSelected,
   isPinned,
   onSelect,
   onPin,
   onUnpin,
   onDuplicate,
   onDelete,
+  onMove,
   onRefreshSettings,
 }: NoteItemWithMenuProps) {
   const handlePin = useCallback(async () => {
@@ -184,6 +196,7 @@ const NoteItemWithMenu = memo(function NoteItemWithMenu({
             preview={preview}
             modified={modified}
             isSelected={isSelected}
+            isMultiSelected={isMultiSelected}
             isPinned={isPinned}
             onSelect={onSelect}
           />
@@ -208,6 +221,14 @@ const NoteItemWithMenu = memo(function NoteItemWithMenu({
           >
             <CopyIcon className="w-4 h-4 stroke-[1.6]" />
             Copy Filepath
+          </ContextMenu.Item>
+          <ContextMenu.Separator className={menuSeparatorClass} />
+          <ContextMenu.Item
+            className={menuItemClass}
+            onSelect={() => onMove(id)}
+          >
+            <FolderIcon className="w-4 h-4 stroke-[1.6]" />
+            Move to...
           </ContextMenu.Item>
           <ContextMenu.Separator className={menuSeparatorClass} />
           <ContextMenu.Item
@@ -254,6 +275,8 @@ export function NoteList({
 
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [noteToDelete, setNoteToDelete] = useState<string | null>(null);
+  const [moveDialogOpen, setMoveDialogOpen] = useState(false);
+  const [noteToMove, setNoteToMove] = useState<string | null>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -290,6 +313,11 @@ export function NoteList({
     setDeleteDialogOpen(true);
   }, []);
 
+  const openMoveDialogForNote = useCallback((noteId: string) => {
+    setNoteToMove(noteId);
+    setMoveDialogOpen(true);
+  }, []);
+
   const refreshSettings = useCallback(() => {
     notesService.getSettings().then(setSettings);
   }, []);
@@ -306,6 +334,65 @@ export function NoteList({
     }
     return notes;
   }, [searchQuery, searchResults, notes]);
+
+  const displayNoteIds = useMemo(
+    () => displayItems.map((item) => item.id),
+    [displayItems],
+  );
+
+  const handleNoteSelect = useCallback(
+    (noteId: string, event: React.MouseEvent) => {
+      const isMeta = event.metaKey || event.ctrlKey;
+      const isShift = event.shiftKey;
+
+      if (isShift) {
+        const anchor = lastClickedNoteId ?? selectedNoteId;
+        let anchorIdx = anchor ? displayNoteIds.indexOf(anchor) : -1;
+        if (anchorIdx === -1 && selectedNoteId) {
+          anchorIdx = displayNoteIds.indexOf(selectedNoteId);
+        }
+        const targetIdx = displayNoteIds.indexOf(noteId);
+
+        if (anchorIdx !== -1 && targetIdx !== -1) {
+          const start = Math.min(anchorIdx, targetIdx);
+          const end = Math.max(anchorIdx, targetIdx);
+          const range = new Set(displayNoteIds.slice(start, end + 1));
+          if (selectedNoteId) range.add(selectedNoteId);
+          setMultiSelectedNoteIds(range);
+        }
+        return;
+      }
+
+      if (isMeta) {
+        setMultiSelectedNoteIds((prev) => {
+          const next = new Set(prev);
+          if (selectedNoteId && !next.has(selectedNoteId)) {
+            next.add(selectedNoteId);
+          }
+          if (next.has(noteId)) {
+            next.delete(noteId);
+          } else {
+            next.add(noteId);
+          }
+          return next;
+        });
+        setLastClickedNoteId(noteId);
+        return;
+      }
+
+      setMultiSelectedNoteIds(new Set([noteId]));
+      setLastClickedNoteId(noteId);
+      selectNote(noteId);
+    },
+    [
+      displayNoteIds,
+      lastClickedNoteId,
+      selectedNoteId,
+      selectNote,
+      setLastClickedNoteId,
+      setMultiSelectedNoteIds,
+    ],
+  );
 
   // Listen for focus request from editor (when Escape is pressed)
   useEffect(() => {
@@ -368,6 +455,16 @@ export function NoteList({
           setMultiSelectedNoteIds={setMultiSelectedNoteIds}
           lastClickedNoteId={lastClickedNoteId}
           setLastClickedNoteId={setLastClickedNoteId}
+          onMoveNote={openMoveDialogForNote}
+        />
+
+        <MoveNoteDialog
+          open={moveDialogOpen}
+          noteId={noteToMove}
+          onOpenChange={(open) => {
+            setMoveDialogOpen(open);
+            if (!open) setNoteToMove(null);
+          }}
         />
 
         {/* Delete confirmation dialog */}
@@ -411,16 +508,27 @@ export function NoteList({
             preview={item.preview}
             modified={item.modified}
             isSelected={selectedNoteId === item.id}
+            isMultiSelected={multiSelectedNoteIds.has(item.id)}
             isPinned={pinnedIds.has(item.id)}
-            onSelect={selectNote}
+            onSelect={handleNoteSelect}
             onPin={pinNote}
             onUnpin={unpinNote}
             onDuplicate={duplicateNote}
             onDelete={openDeleteDialogForNote}
+            onMove={openMoveDialogForNote}
             onRefreshSettings={refreshSettings}
           />
         ))}
       </div>
+
+      <MoveNoteDialog
+        open={moveDialogOpen}
+        noteId={noteToMove}
+        onOpenChange={(open) => {
+          setMoveDialogOpen(open);
+          if (!open) setNoteToMove(null);
+        }}
+      />
 
       {/* Delete confirmation dialog */}
       <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>

@@ -134,8 +134,9 @@ interface ListItemProps {
   subtitle?: string;
   meta?: string;
   isSelected?: boolean;
+  isMultiSelected?: boolean;
   isPinned?: boolean;
-  onClick?: () => void;
+  onClick?: React.MouseEventHandler<HTMLDivElement>;
   /** Optional status icon to display next to meta */
 }
 
@@ -144,6 +145,7 @@ export function ListItem({
   subtitle,
   meta,
   isSelected = false,
+  isMultiSelected = false,
   isPinned = false,
   onClick,
   onContextMenu,
@@ -166,6 +168,8 @@ export function ListItem({
         "focus:outline-none focus-visible:outline-none",
         isSelected
           ? "bg-bg-muted group-focus/notelist:ring-1 group-focus/notelist:ring-text-muted"
+          : isMultiSelected
+            ? "bg-bg-muted"
           : "hover:bg-bg-muted"
       )}
     >
@@ -184,7 +188,7 @@ export function ListItem({
           <div
             className={cn(
               "text-xs whitespace-nowrap",
-              isSelected ? "text-text" : "text-text-muted"
+              isSelected || isMultiSelected ? "text-text" : "text-text-muted"
             )}
           >
             {meta}
@@ -194,7 +198,7 @@ export function ListItem({
           className={cn(
             "text-xs line-clamp-1 min-h-5",
             hasSubtitle ? "text-text-muted" : "text-transparent",
-            isSelected ? "opacity-100" : "opacity-70"
+            isSelected || isMultiSelected ? "opacity-100" : "opacity-70"
           )}
         >
           {hasSubtitle ? cleanSubtitle : "\u00A0"}

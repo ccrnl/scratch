@@ -86,11 +86,19 @@ export function NotesProvider({ children }: { children: ReactNode }) {
   const searchRequestIdRef = useRef(0);
   // Tracks the ID of a newly created note so Editor can focus its title.
   const pendingNewNoteIdRef = useRef<string | null>(null);
+  // Refs to the latest search function and query, so actions like move can
+  // refresh results (whose IDs/paths change) without depending on them.
+  const searchRef = useRef<((query: string) => Promise<void>) | null>(null);
+  const searchQueryRef = useRef("");
+  searchQueryRef.current = searchQuery;
 
   const refreshNotes = useCallback(async () => {
     if (!notesFolder) return;
     try {
       const notesList = await notesService.listNotes();
+      // Update the ref eagerly so callbacks running right after an awaited
+      // refresh (e.g. re-running search after a move) see the fresh list.
+      notesRef.current = notesList;
       setNotes(notesList);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load notes");
@@ -377,6 +385,7 @@ export function NotesProvider({ children }: { children: ReactNode }) {
         setError(
           err instanceof Error ? err.message : "Failed to create folder"
         );
+        throw err;
       }
     },
     [refreshNotes]
@@ -459,8 +468,14 @@ export function NotesProvider({ children }: { children: ReactNode }) {
           return prevId;
         });
         await refreshNotes();
+        // Search results carry stale IDs/paths after a move; refresh them so
+        // the moved note shows its new location.
+        if (searchQueryRef.current.trim()) {
+          await searchRef.current?.(searchQueryRef.current);
+        }
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to move note");
+        throw err;
       }
     },
     [refreshNotes]
@@ -496,6 +511,10 @@ export function NotesProvider({ children }: { children: ReactNode }) {
         });
 
         await refreshNotes();
+        // Moved notes get new IDs/paths; refresh any active search results.
+        if (searchQueryRef.current.trim()) {
+          await searchRef.current?.(searchQueryRef.current);
+        }
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to move folder");
       }
@@ -589,6 +608,7 @@ export function NotesProvider({ children }: { children: ReactNode }) {
     if (requestId !== searchRequestIdRef.current) return;
     setIsSearching(false);
   }, []);
+  searchRef.current = search;
 
   const clearSearch = useCallback(() => {
     searchRequestIdRef.current += 1;

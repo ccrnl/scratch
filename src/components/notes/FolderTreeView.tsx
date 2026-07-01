@@ -26,6 +26,7 @@ import {
   ChevronRightIcon,
   ChevronDownIcon,
   AddNoteIcon,
+  FolderIcon,
   FolderPlusIcon,
   PencilIcon,
   TrashIcon,
@@ -73,6 +74,7 @@ interface FileItemProps {
   onUnpin: (id: string) => Promise<void>;
   onDuplicate: (id: string) => Promise<void>;
   onDelete: (id: string) => void;
+  onMove: (id: string) => void;
   onMoveToParent?: (id: string, targetFolder: string) => void;
   focusedItemKey?: string | null;
 }
@@ -88,6 +90,7 @@ const FileItem = memo(function FileItem({
   onUnpin,
   onDuplicate,
   onDelete,
+  onMove,
   onMoveToParent,
   focusedItemKey,
 }: FileItemProps) {
@@ -206,6 +209,14 @@ const FileItem = memo(function FileItem({
             <CopyIcon className="w-4 h-4 stroke-[1.6]" />
             Copy Filepath
           </ContextMenu.Item>
+          <ContextMenu.Separator className={menuSeparatorClass} />
+          <ContextMenu.Item
+            className={menuItemClass}
+            onSelect={() => onMove(note.id)}
+          >
+            <FolderIcon className="w-4 h-4 stroke-[1.6]" />
+            Move to...
+          </ContextMenu.Item>
           {noteParentFolder && onMoveToParent && (
             <>
               <ContextMenu.Separator className={menuSeparatorClass} />
@@ -265,6 +276,7 @@ interface FolderItemProps {
   onUnpinNote: (id: string) => Promise<void>;
   onDuplicateNote: (id: string) => Promise<void>;
   onDeleteNote: (id: string) => void;
+  onMoveNote: (id: string) => void;
   onMoveNoteToParent: (id: string, targetFolder: string) => void;
   onMoveFolderToParent: (path: string, targetParent: string) => void;
 }
@@ -287,6 +299,7 @@ const FolderItemComponent = memo(function FolderItem({
   onUnpinNote,
   onDuplicateNote,
   onDeleteNote,
+  onMoveNote,
   onMoveNoteToParent,
   onMoveFolderToParent,
 }: FolderItemProps) {
@@ -369,6 +382,7 @@ const FolderItemComponent = memo(function FolderItem({
                   onUnpinNote={onUnpinNote}
                   onDuplicateNote={onDuplicateNote}
                   onDeleteNote={onDeleteNote}
+                  onMoveNote={onMoveNote}
                   onMoveNoteToParent={onMoveNoteToParent}
                   onMoveFolderToParent={onMoveFolderToParent}
                 />
@@ -386,6 +400,7 @@ const FolderItemComponent = memo(function FolderItem({
                   onUnpin={onUnpinNote}
                   onDuplicate={onDuplicateNote}
                   onDelete={onDeleteNote}
+                  onMove={onMoveNote}
                   onMoveToParent={onMoveNoteToParent}
                   focusedItemKey={focusedItemKey}
                 />
@@ -480,6 +495,7 @@ interface FolderTreeViewProps {
   setMultiSelectedNoteIds: React.Dispatch<React.SetStateAction<Set<string>>>;
   lastClickedNoteId: string | null;
   setLastClickedNoteId: React.Dispatch<React.SetStateAction<string | null>>;
+  onMoveNote: (id: string) => void;
 }
 
 export function FolderTreeView({
@@ -489,6 +505,7 @@ export function FolderTreeView({
   setMultiSelectedNoteIds,
   lastClickedNoteId,
   setLastClickedNoteId,
+  onMoveNote,
 }: FolderTreeViewProps) {
   const {
     notes,
@@ -870,6 +887,7 @@ export function FolderTreeView({
             onUnpin={unpinNote}
             onDuplicate={duplicateNote}
             onDelete={openDeleteNoteDialog}
+            onMove={onMoveNote}
             focusedItemKey={focusedItemKey}
           />
         ))}
@@ -895,6 +913,7 @@ export function FolderTreeView({
             onUnpinNote={unpinNote}
             onDuplicateNote={duplicateNote}
             onDeleteNote={openDeleteNoteDialog}
+            onMoveNote={onMoveNote}
             onMoveNoteToParent={moveNote}
             onMoveFolderToParent={moveFolder}
           />
@@ -914,6 +933,7 @@ export function FolderTreeView({
             onUnpin={unpinNote}
             onDuplicate={duplicateNote}
             onDelete={openDeleteNoteDialog}
+            onMove={onMoveNote}
             focusedItemKey={focusedItemKey}
           />
         ))}
