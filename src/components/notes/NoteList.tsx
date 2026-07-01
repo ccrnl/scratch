@@ -72,8 +72,9 @@ interface NoteItemProps {
   preview?: string;
   modified: number;
   isSelected: boolean;
+  isMultiSelected: boolean;
   isPinned: boolean;
-  onSelect: (id: string) => void;
+  onSelect: (id: string, event: React.MouseEvent) => void;
   depth?: number;
   showFolderPrefix?: boolean;
 }
@@ -84,13 +85,17 @@ export const NoteItem = memo(function NoteItem({
   preview,
   modified,
   isSelected,
+  isMultiSelected,
   isPinned,
   onSelect,
   depth,
   showFolderPrefix = true,
 }: NoteItemProps) {
   const ref = useRef<HTMLDivElement>(null);
-  const handleClick = useCallback(() => onSelect(id), [onSelect, id]);
+  const handleClick = useCallback(
+    (event: React.MouseEvent) => onSelect(id, event),
+    [onSelect, id],
+  );
 
   useEffect(() => {
     if (isSelected) {
@@ -118,6 +123,7 @@ export const NoteItem = memo(function NoteItem({
         subtitle={displayPreview}
         meta={formatDate(modified)}
         isSelected={isSelected}
+        isMultiSelected={isMultiSelected}
         isPinned={isPinned}
         onClick={handleClick}
       />
@@ -132,8 +138,9 @@ interface NoteItemWithMenuProps {
   preview?: string;
   modified: number;
   isSelected: boolean;
+  isMultiSelected: boolean;
   isPinned: boolean;
-  onSelect: (id: string) => void;
+  onSelect: (id: string, event: React.MouseEvent) => void;
   onPin: (id: string) => Promise<void>;
   onUnpin: (id: string) => Promise<void>;
   onDuplicate: (id: string) => void;
@@ -148,6 +155,7 @@ const NoteItemWithMenu = memo(function NoteItemWithMenu({
   preview,
   modified,
   isSelected,
+  isMultiSelected,
   isPinned,
   onSelect,
   onPin,
@@ -188,6 +196,7 @@ const NoteItemWithMenu = memo(function NoteItemWithMenu({
             preview={preview}
             modified={modified}
             isSelected={isSelected}
+            isMultiSelected={isMultiSelected}
             isPinned={isPinned}
             onSelect={onSelect}
           />
@@ -326,6 +335,65 @@ export function NoteList({
     return notes;
   }, [searchQuery, searchResults, notes]);
 
+  const displayNoteIds = useMemo(
+    () => displayItems.map((item) => item.id),
+    [displayItems],
+  );
+
+  const handleNoteSelect = useCallback(
+    (noteId: string, event: React.MouseEvent) => {
+      const isMeta = event.metaKey || event.ctrlKey;
+      const isShift = event.shiftKey;
+
+      if (isShift) {
+        const anchor = lastClickedNoteId ?? selectedNoteId;
+        let anchorIdx = anchor ? displayNoteIds.indexOf(anchor) : -1;
+        if (anchorIdx === -1 && selectedNoteId) {
+          anchorIdx = displayNoteIds.indexOf(selectedNoteId);
+        }
+        const targetIdx = displayNoteIds.indexOf(noteId);
+
+        if (anchorIdx !== -1 && targetIdx !== -1) {
+          const start = Math.min(anchorIdx, targetIdx);
+          const end = Math.max(anchorIdx, targetIdx);
+          const range = new Set(displayNoteIds.slice(start, end + 1));
+          if (selectedNoteId) range.add(selectedNoteId);
+          setMultiSelectedNoteIds(range);
+        }
+        return;
+      }
+
+      if (isMeta) {
+        setMultiSelectedNoteIds((prev) => {
+          const next = new Set(prev);
+          if (selectedNoteId && !next.has(selectedNoteId)) {
+            next.add(selectedNoteId);
+          }
+          if (next.has(noteId)) {
+            next.delete(noteId);
+          } else {
+            next.add(noteId);
+          }
+          return next;
+        });
+        setLastClickedNoteId(noteId);
+        return;
+      }
+
+      setMultiSelectedNoteIds(new Set([noteId]));
+      setLastClickedNoteId(noteId);
+      selectNote(noteId);
+    },
+    [
+      displayNoteIds,
+      lastClickedNoteId,
+      selectedNoteId,
+      selectNote,
+      setLastClickedNoteId,
+      setMultiSelectedNoteIds,
+    ],
+  );
+
   // Listen for focus request from editor (when Escape is pressed)
   useEffect(() => {
     const handleFocusNoteList = () => {
@@ -440,8 +508,9 @@ export function NoteList({
             preview={item.preview}
             modified={item.modified}
             isSelected={selectedNoteId === item.id}
+            isMultiSelected={multiSelectedNoteIds.has(item.id)}
             isPinned={pinnedIds.has(item.id)}
-            onSelect={selectNote}
+            onSelect={handleNoteSelect}
             onPin={pinNote}
             onUnpin={unpinNote}
             onDuplicate={duplicateNote}
