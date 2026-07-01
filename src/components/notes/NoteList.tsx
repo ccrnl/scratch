@@ -16,10 +16,12 @@ import {
 import { cleanTitle } from "../../lib/utils";
 import * as notesService from "../../services/notes";
 import { FolderTreeView } from "./FolderTreeView";
+import { MoveNoteDialog } from "./MoveNoteDialog";
 import {
   PinIcon,
   CopyIcon,
   TrashIcon,
+  FolderIcon,
 } from "../icons";
 import type { Settings } from "../../types/note";
 
@@ -136,6 +138,7 @@ interface NoteItemWithMenuProps {
   onUnpin: (id: string) => Promise<void>;
   onDuplicate: (id: string) => void;
   onDelete: (id: string) => void;
+  onMove: (id: string) => void;
   onRefreshSettings: () => Promise<void> | void;
 }
 
@@ -151,6 +154,7 @@ const NoteItemWithMenu = memo(function NoteItemWithMenu({
   onUnpin,
   onDuplicate,
   onDelete,
+  onMove,
   onRefreshSettings,
 }: NoteItemWithMenuProps) {
   const handlePin = useCallback(async () => {
@@ -211,6 +215,14 @@ const NoteItemWithMenu = memo(function NoteItemWithMenu({
           </ContextMenu.Item>
           <ContextMenu.Separator className={menuSeparatorClass} />
           <ContextMenu.Item
+            className={menuItemClass}
+            onSelect={() => onMove(id)}
+          >
+            <FolderIcon className="w-4 h-4 stroke-[1.6]" />
+            Move to...
+          </ContextMenu.Item>
+          <ContextMenu.Separator className={menuSeparatorClass} />
+          <ContextMenu.Item
             className={
               menuItemClass +
               " text-red-500 hover:text-red-500 focus:text-red-500"
@@ -254,6 +266,8 @@ export function NoteList({
 
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [noteToDelete, setNoteToDelete] = useState<string | null>(null);
+  const [moveDialogOpen, setMoveDialogOpen] = useState(false);
+  const [noteToMove, setNoteToMove] = useState<string | null>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -288,6 +302,11 @@ export function NoteList({
   const openDeleteDialogForNote = useCallback((noteId: string) => {
     setNoteToDelete(noteId);
     setDeleteDialogOpen(true);
+  }, []);
+
+  const openMoveDialogForNote = useCallback((noteId: string) => {
+    setNoteToMove(noteId);
+    setMoveDialogOpen(true);
   }, []);
 
   const refreshSettings = useCallback(() => {
@@ -368,6 +387,16 @@ export function NoteList({
           setMultiSelectedNoteIds={setMultiSelectedNoteIds}
           lastClickedNoteId={lastClickedNoteId}
           setLastClickedNoteId={setLastClickedNoteId}
+          onMoveNote={openMoveDialogForNote}
+        />
+
+        <MoveNoteDialog
+          open={moveDialogOpen}
+          noteId={noteToMove}
+          onOpenChange={(open) => {
+            setMoveDialogOpen(open);
+            if (!open) setNoteToMove(null);
+          }}
         />
 
         {/* Delete confirmation dialog */}
@@ -417,10 +446,20 @@ export function NoteList({
             onUnpin={unpinNote}
             onDuplicate={duplicateNote}
             onDelete={openDeleteDialogForNote}
+            onMove={openMoveDialogForNote}
             onRefreshSettings={refreshSettings}
           />
         ))}
       </div>
+
+      <MoveNoteDialog
+        open={moveDialogOpen}
+        noteId={noteToMove}
+        onOpenChange={(open) => {
+          setMoveDialogOpen(open);
+          if (!open) setNoteToMove(null);
+        }}
+      />
 
       {/* Delete confirmation dialog */}
       <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>

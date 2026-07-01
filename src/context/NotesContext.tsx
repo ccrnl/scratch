@@ -377,6 +377,7 @@ export function NotesProvider({ children }: { children: ReactNode }) {
         setError(
           err instanceof Error ? err.message : "Failed to create folder"
         );
+        throw err;
       }
     },
     [refreshNotes]
@@ -461,6 +462,7 @@ export function NotesProvider({ children }: { children: ReactNode }) {
         await refreshNotes();
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to move note");
+        throw err;
       }
     },
     [refreshNotes]
