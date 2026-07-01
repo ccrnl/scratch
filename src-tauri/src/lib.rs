@@ -382,6 +382,22 @@ fn sanitize_filename(title: &str) -> String {
     }
 }
 
+fn sanitize_note_path(path_like: &str) -> String {
+    let parts: Vec<String> = path_like
+        .split(['/', '\\'])
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(sanitize_filename)
+        .filter(|part| !part.is_empty())
+        .collect();
+
+    if parts.is_empty() {
+        "Untitled".to_string()
+    } else {
+        parts.join("/")
+    }
+}
+
 fn ordinal_suffix(day: u32) -> &'static str {
     match (day % 100, day % 10) {
         (11..=13, _) => "th",
@@ -1216,8 +1232,8 @@ async fn create_note(target_folder: Option<String>, state: State<'_, AppState>) 
     // Expand template tags
     let expanded = expand_note_name_template(&template);
 
-    // Sanitize filename
-    let sanitized = sanitize_filename(&expanded);
+    // Sanitize each path segment while preserving template separators
+    let sanitized = sanitize_note_path(&expanded);
 
     // Prepend folder prefix if specified
     let sanitized = if let Some(ref folder_prefix) = target_folder {
@@ -1827,7 +1843,7 @@ async fn write_file(path: String, contents: Vec<u8>) -> Result<(), String> {
 #[tauri::command]
 fn preview_note_name(template: String) -> Result<String, String> {
     let expanded = expand_note_name_template(&template);
-    let sanitized = sanitize_filename(&expanded);
+    let sanitized = sanitize_note_path(&expanded);
 
     // Show first note name (with counter as 1 if present)
     let preview = if template.contains("{counter}") {
@@ -4208,6 +4224,13 @@ mod tests {
             .expect("system time after unix epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("scratch-{}-{}", name, timestamp))
+    }
+
+    #[test]
+    fn sanitizes_note_path_segments_without_flattening_directories() {
+        assert_eq!(sanitize_note_path("2026/07/01"), "2026/07/01");
+        assert_eq!(sanitize_note_path("2026\\07\\01"), "2026/07/01");
+        assert_eq!(sanitize_note_path("2026/{month}/01"), "2026/{month}/01");
     }
 
     #[test]
