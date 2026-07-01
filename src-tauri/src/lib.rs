@@ -382,22 +382,6 @@ fn sanitize_filename(title: &str) -> String {
     }
 }
 
-fn sanitize_note_path(path_like: &str) -> String {
-    let parts: Vec<String> = path_like
-        .split(['/', '\\'])
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .map(sanitize_filename)
-        .filter(|part| !part.is_empty())
-        .collect();
-
-    if parts.is_empty() {
-        "Untitled".to_string()
-    } else {
-        parts.join("/")
-    }
-}
-
 fn ordinal_suffix(day: u32) -> &'static str {
     match (day % 100, day % 10) {
         (11..=13, _) => "th",
@@ -445,26 +429,19 @@ fn expand_note_name_template(template: &str) -> String {
     result
 }
 
-/// Extracts a display title from a note ID (filename)
-fn extract_title_from_id(id: &str) -> String {
-    // Get last path component (filename)
-    let filename = id.rsplit('/').next().unwrap_or(id);
+fn note_display_title_from_template(template: &str) -> String {
+    let expanded = expand_note_name_template(template);
+    let display_title = if template.contains("{counter}") {
+        expanded.replace("{counter}", "1")
+    } else {
+        expanded
+    };
 
-    // Convert to display title (replace dashes/underscores with spaces)
-    let title = filename.replace(['-', '_'], " ");
-
-    // Title case
-    title
-        .split_whitespace()
-        .map(|word| {
-            let mut chars = word.chars();
-            match chars.next() {
-                None => String::new(),
-                Some(first) => first.to_uppercase().to_string() + chars.as_str(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    if is_effectively_empty(&display_title) {
+        "Untitled".to_string()
+    } else {
+        display_title
+    }
 }
 
 // Utility: Check if a string is effectively empty
@@ -1231,9 +1208,10 @@ async fn create_note(target_folder: Option<String>, state: State<'_, AppState>) 
 
     // Expand template tags
     let expanded = expand_note_name_template(&template);
+    let display_title = note_display_title_from_template(&template);
 
-    // Sanitize each path segment while preserving template separators
-    let sanitized = sanitize_note_path(&expanded);
+    // Sanitize filename for disk storage
+    let sanitized = sanitize_filename(&expanded);
 
     // Prepend folder prefix if specified
     let sanitized = if let Some(ref folder_prefix) = target_folder {
@@ -1269,9 +1247,6 @@ async fn create_note(target_folder: Option<String>, state: State<'_, AppState>) 
         }
         counter += 1;
     }
-
-    // Extract display title from filename
-    let display_title = extract_title_from_id(&final_id);
 
     let content = format!("# {}\n\n", display_title);
     let file_path = abs_path_from_id(&folder_path, &final_id)?;
@@ -1842,17 +1817,7 @@ async fn write_file(path: String, contents: Vec<u8>) -> Result<(), String> {
 
 #[tauri::command]
 fn preview_note_name(template: String) -> Result<String, String> {
-    let expanded = expand_note_name_template(&template);
-    let sanitized = sanitize_note_path(&expanded);
-
-    // Show first note name (with counter as 1 if present)
-    let preview = if template.contains("{counter}") {
-        sanitized.replace("{counter}", "1")
-    } else {
-        sanitized
-    };
-
-    Ok(preview)
+    Ok(note_display_title_from_template(&template))
 }
 
 // Preview mode: file content returned by read_file_direct / save_file_direct
@@ -4227,10 +4192,15 @@ mod tests {
     }
 
     #[test]
-    fn sanitizes_note_path_segments_without_flattening_directories() {
-        assert_eq!(sanitize_note_path("2026/07/01"), "2026/07/01");
-        assert_eq!(sanitize_note_path("2026\\07\\01"), "2026/07/01");
-        assert_eq!(sanitize_note_path("2026/{month}/01"), "2026/{month}/01");
+    fn renders_note_title_from_template_without_flattening_it() {
+        assert_eq!(
+            note_display_title_from_template("{year}/{month}/{day}"),
+            "2026/07/01"
+        );
+        assert_eq!(
+            note_display_title_from_template("Report {counter}"),
+            "Report 1"
+        );
     }
 
     #[test]
