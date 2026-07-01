@@ -35,7 +35,6 @@ import tippy, { type Instance as TippyInstance } from "tippy.js";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
-import { join } from "@tauri-apps/api/path";
 import { toast } from "sonner";
 import { mod, alt, shift, isMac } from "../../lib/platform";
 
@@ -1286,21 +1285,17 @@ export function Editor({
                 // Save clipboard image
                 const relativePath = await invoke<string>(
                   "save_clipboard_image",
-                  { base64Data: base64 },
+                  {
+                    base64Data: base64,
+                    targetNotePath: currentNotePathRef.current,
+                  },
                 );
-
-                // Get notes folder and construct absolute path using Tauri's join
-                const notesFolder = await invoke<string>("get_notes_folder");
-                const absolutePath = await join(notesFolder, relativePath);
-
-                // Convert to Tauri asset URL
-                const assetUrl = convertFileSrc(absolutePath);
 
                 // Insert image
                 editorRef.current
                   ?.chain()
                   .focus()
-                  .setImage({ src: assetUrl })
+                  .setImage({ src: relativePath })
                   .run();
               } catch (error) {
                 console.error("Failed to paste image:", error);
@@ -1795,20 +1790,12 @@ export function Editor({
     });
     if (selected) {
       try {
-        // Copy image to assets folder and get relative path (assets/filename.ext)
-        const relativePath = await invoke<string>("copy_image_to_assets", {
+        const relativePath = await invoke<string>("copy_image_to_resources", {
           sourcePath: selected as string,
+          targetNotePath: currentNotePathRef.current,
         });
 
-        // Get notes folder and construct absolute path using Tauri's join
-        const notesFolder = await invoke<string>("get_notes_folder");
-        const absolutePath = await join(notesFolder, relativePath);
-
-        // Convert to Tauri asset URL
-        const assetUrl = convertFileSrc(absolutePath);
-
-        // Insert image with asset URL
-        editor.chain().focus().setImage({ src: assetUrl }).run();
+        editor.chain().focus().setImage({ src: relativePath }).run();
       } catch (error) {
         console.error("Failed to add image:", error);
       }

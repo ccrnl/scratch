@@ -20,6 +20,7 @@ export interface ThemeSettings {
 export type FontFamily = "system-sans" | "serif" | "monospace";
 export type TextDirection = "auto" | "ltr" | "rtl";
 export type EditorWidth = "narrow" | "normal" | "wide" | "full" | "custom";
+export type ResourceStorageLocation = "assets" | "note-folder";
 
 export interface EditorFontSettings {
   baseFontFamily?: FontFamily;
@@ -56,6 +57,7 @@ export interface Settings {
   defaultNoteName?: string;
   interfaceZoom?: number;
   sidebarWidth?: number;
+  resourceStorageLocation?: ResourceStorageLocation;
   ollamaModel?: string;
   ignoredPatterns?: string[];
   customColorsLight?: CustomColors;
