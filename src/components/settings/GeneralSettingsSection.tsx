@@ -1017,23 +1017,32 @@ function ResourceStorageSettings() {
         open={migrationDialogOpen}
         onOpenChange={handleMigrationDialogOpenChange}
       >
-        <AlertDialogContent>
-          <AlertDialogHeader>
+        <AlertDialogContent className="!w-[calc(100vw-2rem)] !max-w-[560px] max-h-[calc(100vh-2rem)] overflow-x-hidden overflow-y-auto">
+          <AlertDialogHeader className="min-w-0">
             <AlertDialogTitle>Migrate existing resources?</AlertDialogTitle>
-            <AlertDialogDescription>
+            <AlertDialogDescription className="leading-relaxed break-words">
               {pendingLocation
                 ? `New images will use ${formatResourceStorageLocation(migrationTarget)} after migration. Cancel keeps the current setting unchanged.`
                 : `Existing resources will be moved to ${formatResourceStorageLocation(migrationTarget)} and Markdown references will be rewritten.`}
             </AlertDialogDescription>
           </AlertDialogHeader>
           {isMigrating && (
-            <div className="space-y-3 rounded-[10px] border border-border p-3">
-              <div className="flex items-center justify-between gap-3 text-sm">
-                <span className="font-medium text-text">
-                  {migrationProgress?.processedNotes ?? 0} /{" "}
-                  {migrationProgress?.totalNotes ?? 0} documents
-                </span>
-                <span className="text-text-muted">ETA {migrationEta}</span>
+            <div className="min-w-0 space-y-3 rounded-lg border border-border bg-bg-muted/30 p-3">
+              <div className="grid grid-cols-[1fr_auto] items-start gap-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-text">
+                    {migrationProgress?.processedNotes ?? 0} /{" "}
+                    {migrationProgress?.totalNotes ?? 0} documents
+                  </p>
+                  <p className="text-xs text-text-muted">
+                    Updated {migrationProgress?.notesUpdated ?? 0} notes,
+                    moved {migrationProgress?.resourcesMoved ?? 0} resources,
+                    skipped {migrationProgress?.referencesSkipped ?? 0}
+                  </p>
+                </div>
+                <div className="shrink-0 rounded-md border border-border bg-bg px-2 py-1 text-xs text-text-muted">
+                  ETA {migrationEta}
+                </div>
               </div>
               <div className="h-2 overflow-hidden rounded-full bg-bg-muted">
                 <div
@@ -1041,19 +1050,20 @@ function ResourceStorageSettings() {
                   style={{ width: `${migrationProgressPercent}%` }}
                 />
               </div>
-              <div className="space-y-1 text-xs text-text-muted">
-                <p className="truncate" title={migrationProgress?.currentNote ?? undefined}>
-                  Current: {migrationProgress?.currentNote ?? "Preparing migration..."}
+              <div className="min-w-0 rounded-md bg-bg px-2.5 py-2">
+                <p className="mb-1 text-xs font-medium text-text-muted">
+                  Current document
                 </p>
-                <p>
-                  Updated {migrationProgress?.notesUpdated ?? 0} notes, moved{" "}
-                  {migrationProgress?.resourcesMoved ?? 0} resources, skipped{" "}
-                  {migrationProgress?.referencesSkipped ?? 0} references
+                <p
+                  className="truncate text-xs text-text"
+                  title={migrationProgress?.currentNote ?? undefined}
+                >
+                  {migrationProgress?.currentNote ?? "Preparing migration..."}
                 </p>
               </div>
             </div>
           )}
-          <AlertDialogFooter>
+          <AlertDialogFooter className="min-w-0">
             <AlertDialogCancel disabled={isMigrating}>Cancel</AlertDialogCancel>
             <AlertDialogAction
               onClick={(e) => {
