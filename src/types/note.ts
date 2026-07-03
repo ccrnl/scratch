@@ -62,6 +62,15 @@ export interface Settings {
   ignoredPatterns?: string[];
   customColorsLight?: CustomColors;
   customColorsDark?: CustomColors;
+  itemColors?: Record<string, ItemColorConfig>;
+}
+
+export interface ItemColorConfig {
+  color?: string;
+  applyToChildren: boolean;
+  bold?: boolean;
+  icon?: string;
+  description?: string;
 }
 
 export interface FolderNode {
