@@ -22,8 +22,10 @@ import {
   CopyIcon,
   TrashIcon,
   FolderIcon,
+  SettingsIcon,
 } from "../icons";
-import type { Settings } from "../../types/note";
+import { ItemConfigDialog } from "./ItemConfigDialog";
+import type { Settings, ItemColorConfig } from "../../types/note";
 
 const menuItemClass =
   "px-3 py-1.5 text-sm text-text cursor-pointer outline-none hover:bg-bg-muted focus:bg-bg-muted flex items-center gap-2 rounded-sm";
@@ -147,6 +149,7 @@ interface NoteItemWithMenuProps {
   onDelete: (id: string) => void;
   onMove: (id: string) => void;
   onRefreshSettings: () => Promise<void> | void;
+  onConfigure: (id: string, name: string) => void;
 }
 
 const NoteItemWithMenu = memo(function NoteItemWithMenu({
@@ -164,6 +167,7 @@ const NoteItemWithMenu = memo(function NoteItemWithMenu({
   onDelete,
   onMove,
   onRefreshSettings,
+  onConfigure,
 }: NoteItemWithMenuProps) {
   const handlePin = useCallback(async () => {
     try {
@@ -229,6 +233,14 @@ const NoteItemWithMenu = memo(function NoteItemWithMenu({
           >
             <FolderIcon className="w-4 h-4 stroke-[1.6]" />
             Move to...
+          </ContextMenu.Item>
+          <ContextMenu.Separator className={menuSeparatorClass} />
+          <ContextMenu.Item
+            className={menuItemClass}
+            onSelect={() => onConfigure(id, cleanTitle(title))}
+          >
+            <SettingsIcon className="w-4 h-4 stroke-[1.6]" />
+            Configure
           </ContextMenu.Item>
           <ContextMenu.Separator className={menuSeparatorClass} />
           <ContextMenu.Item
@@ -321,6 +333,46 @@ export function NoteList({
   const refreshSettings = useCallback(() => {
     notesService.getSettings().then(setSettings);
   }, []);
+
+  const [configDialogOpen, setConfigDialogOpen] = useState(false);
+  const [configItemPath, setConfigItemPath] = useState("");
+  const [configItemName, setConfigItemName] = useState("");
+
+  const handleOpenConfigure = useCallback((id: string, name: string) => {
+    setConfigItemPath(id);
+    setConfigItemName(name);
+    setConfigDialogOpen(true);
+  }, []);
+
+  const handleSaveItemColor = useCallback(
+    (path: string, config: ItemColorConfig | null) => {
+      if (!settings) return;
+      const newItemColors = { ...(settings.itemColors ?? {}) };
+      if (config) {
+        newItemColors[path] = config;
+      } else {
+        delete newItemColors[path];
+      }
+      const newSettings = {
+        ...settings,
+        itemColors: Object.keys(newItemColors).length > 0 ? newItemColors : undefined,
+      };
+      notesService.updateSettings(newSettings).then(() => {
+        setSettings(newSettings);
+      });
+    },
+    [settings],
+  );
+
+  const handleRenameNote = useCallback(
+    async (oldPath: string, newName: string) => {
+      const newId = await notesService.renameNote(oldPath, newName);
+      if (selectedNoteId === oldPath) {
+        selectNote(newId);
+      }
+    },
+    [selectedNoteId, selectNote],
+  );
 
   // Memoize display items to prevent recalculation on every render
   const displayItems = useMemo(() => {
@@ -456,6 +508,7 @@ export function NoteList({
           lastClickedNoteId={lastClickedNoteId}
           setLastClickedNoteId={setLastClickedNoteId}
           onMoveNote={openMoveDialogForNote}
+          onSettingsChange={setSettings}
         />
 
         <MoveNoteDialog
@@ -517,9 +570,21 @@ export function NoteList({
             onDelete={openDeleteDialogForNote}
             onMove={openMoveDialogForNote}
             onRefreshSettings={refreshSettings}
+            onConfigure={handleOpenConfigure}
           />
         ))}
       </div>
+
+      <ItemConfigDialog
+        open={configDialogOpen}
+        onOpenChange={setConfigDialogOpen}
+        itemPath={configItemPath}
+        itemName={configItemName}
+        itemType="note"
+        currentConfig={settings?.itemColors?.[configItemPath] ?? null}
+        onSave={handleSaveItemColor}
+        onRename={handleRenameNote}
+      />
 
       <MoveNoteDialog
         open={moveDialogOpen}

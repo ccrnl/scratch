@@ -9,6 +9,7 @@ import {
   type TreeItem,
 } from "../../lib/folderTree";
 import { FolderNameDialog } from "./FolderNameDialog";
+import { ItemConfigDialog } from "./ItemConfigDialog";
 import { cleanTitle } from "../../lib/utils";
 import { toast } from "sonner";
 import {
@@ -34,9 +35,10 @@ import {
   PinIcon,
   CopyIcon,
   ArrowUpIcon,
+  SettingsIcon,
 } from "../icons";
 import * as notesService from "../../services/notes";
-import type { FolderNode, NoteMetadata, Settings } from "../../types/note";
+import type { FolderNode, NoteMetadata, Settings, ItemColorConfig } from "../../types/note";
 
 const STORAGE_KEY = "scratch:collapsedFolders";
 
@@ -62,6 +64,14 @@ function saveCollapsedFolders(folders: Set<string>) {
   }
 }
 
+function getContrastColor(hex: string): string {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  const brightness = (r * 299 + g * 587 + b * 114) / 1000;
+  return brightness > 150 ? "#1a1a1a" : "#ffffff";
+}
+
 // Compact file item for folder tree (VS Code / Obsidian style)
 interface FileItemProps {
   note: NoteMetadata;
@@ -77,6 +87,9 @@ interface FileItemProps {
   onMove: (id: string) => void;
   onMoveToParent?: (id: string, targetFolder: string) => void;
   focusedItemKey?: string | null;
+  itemColor?: string | null;
+  itemConfig?: ItemColorConfig | null;
+  onConfigure: (path: string, name: string, type: "folder" | "note") => void;
 }
 
 const FileItem = memo(function FileItem({
@@ -93,6 +106,9 @@ const FileItem = memo(function FileItem({
   onMove,
   onMoveToParent,
   focusedItemKey,
+  itemColor,
+  itemConfig,
+  onConfigure,
 }: FileItemProps) {
   const itemRef = useRef<HTMLDivElement>(null);
   const handleClick = useCallback(
@@ -126,6 +142,12 @@ const FileItem = memo(function FileItem({
       itemRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
     }
   }, [isSelected]);
+
+  const contrastColor = useMemo(
+    () => (itemColor ? getContrastColor(itemColor) : null),
+    [itemColor],
+  );
+  const isColored = !!itemColor;
 
   const handlePin = useCallback(async () => {
     try {
@@ -163,26 +185,47 @@ const FileItem = memo(function FileItem({
               ? "opacity-40"
               : isOver
                 ? "bg-accent/10 ring-1 ring-accent"
-                : isSelected &&
-                    (!focusedItemKey || focusedItemKey === `note:${note.id}`)
-                  ? "bg-bg-muted group-focus/notelist:ring-1 group-focus/notelist:ring-text-muted"
-                  : isMultiSelected
-                    ? "bg-bg-muted"
-                    : "hover:bg-bg-muted"
+                : isColored
+                  ? isSelected && (!focusedItemKey || focusedItemKey === `note:${note.id}`)
+                    ? "ring-2 ring-text/30"
+                    : isMultiSelected
+                      ? "ring-1 ring-text/20"
+                      : "hover:opacity-80"
+                  : isSelected &&
+                      (!focusedItemKey || focusedItemKey === `note:${note.id}`)
+                    ? "bg-bg-muted group-focus/notelist:ring-1 group-focus/notelist:ring-text-muted"
+                    : isMultiSelected
+                      ? "bg-bg-muted"
+                      : "hover:bg-bg-muted"
           }`}
-          style={{ paddingLeft: `${depth * 12 + 8}px`, paddingRight: "8px" }}
+          style={{
+            paddingLeft: `${depth * 12 + 8}px`,
+            paddingRight: "8px",
+            ...(isColored
+              ? { backgroundColor: itemColor!, color: contrastColor! }
+              : {}),
+          }}
           onClick={handleClick}
           role="button"
           tabIndex={-1}
         >
-          {isPinned ? (
-            <PinIcon className="w-4 h-4 stroke-[1.6] fill-current text-text-muted shrink-0" />
+          {itemConfig?.icon ? (
+            <span className="text-sm shrink-0 leading-none">{itemConfig.icon}</span>
+          ) : isPinned ? (
+            <PinIcon className={`w-4 h-4 stroke-[1.6] fill-current shrink-0 ${isColored ? "" : "text-text-muted"}`} />
           ) : (
-            <NoteIcon className="w-4 h-4 stroke-[1.6] opacity-50 shrink-0" />
+            <NoteIcon className={`w-4 h-4 stroke-[1.6] shrink-0 ${isColored ? "opacity-70" : "opacity-50"}`} />
           )}
-          <span className="text-sm text-text truncate">
-            {cleanTitle(note.title)}
-          </span>
+          <div className="flex flex-col min-w-0">
+            <span className={`text-sm truncate ${isColored ? "" : "text-text"} ${itemConfig?.bold ? "font-bold" : ""}`}>
+              {cleanTitle(note.title)}
+            </span>
+            {itemConfig?.description && (
+              <span className={`text-xs truncate ${isColored ? "opacity-70" : "text-text-muted"}`}>
+                {itemConfig.description}
+              </span>
+            )}
+          </div>
         </div>
       </ContextMenu.Trigger>
       <ContextMenu.Portal>
@@ -243,6 +286,16 @@ const FileItem = memo(function FileItem({
           )}
           <ContextMenu.Separator className={menuSeparatorClass} />
           <ContextMenu.Item
+            className={menuItemClass}
+            onSelect={() =>
+              onConfigure(note.id, cleanTitle(note.title), "note")
+            }
+          >
+            <SettingsIcon className="w-4 h-4 stroke-[1.6]" />
+            Configure
+          </ContextMenu.Item>
+          <ContextMenu.Separator className={menuSeparatorClass} />
+          <ContextMenu.Item
             className={
               menuItemClass +
               " text-red-500 hover:text-red-500 focus:text-red-500"
@@ -279,6 +332,8 @@ interface FolderItemProps {
   onMoveNote: (id: string) => void;
   onMoveNoteToParent: (id: string, targetFolder: string) => void;
   onMoveFolderToParent: (path: string, targetParent: string) => void;
+  itemColors: Record<string, ItemColorConfig>;
+  onConfigure: (path: string, name: string, type: "folder" | "note") => void;
 }
 
 const FolderItemComponent = memo(function FolderItem({
@@ -302,11 +357,52 @@ const FolderItemComponent = memo(function FolderItem({
   onMoveNote,
   onMoveNoteToParent,
   onMoveFolderToParent,
+  itemColors,
+  onConfigure,
 }: FolderItemProps) {
   const isCollapsed = collapsedFolders.has(folder.path);
   const noteCount = countNotesInFolder(folder);
   const isEmpty = noteCount === 0 && folder.children.length === 0;
   const isFocused = focusedItemKey === `folder:${folder.path}`;
+
+  const folderConfig = itemColors[folder.path] ?? null;
+
+  const folderColor = useMemo(() => {
+    if (folderConfig?.color) return folderConfig.color;
+    const parts = folder.path.split("/");
+    for (let i = parts.length - 1; i >= 1; i--) {
+      const parentPath = parts.slice(0, i).join("/");
+      const parentConfig = itemColors[parentPath];
+      if (parentConfig?.applyToChildren && parentConfig.color) return parentConfig.color;
+    }
+    return null;
+  }, [folder.path, folderConfig, itemColors]);
+
+  const contrastColor = useMemo(
+    () => (folderColor ? getContrastColor(folderColor) : null),
+    [folderColor],
+  );
+  const isColored = !!folderColor;
+
+  const getColorForNote = useCallback(
+    (noteId: string): string | null => {
+      const own = itemColors[noteId];
+      if (own?.color) return own.color;
+      const lastSlash = noteId.lastIndexOf("/");
+      if (lastSlash <= 0) return null;
+      const noteFolderPath = noteId.substring(0, lastSlash);
+      const fc = itemColors[noteFolderPath];
+      if (fc?.applyToChildren && fc.color) return fc.color;
+      const fParts = noteFolderPath.split("/");
+      for (let i = fParts.length - 1; i >= 1; i--) {
+        const parentPath = fParts.slice(0, i).join("/");
+        const parentConfig = itemColors[parentPath];
+        if (parentConfig?.applyToChildren && parentConfig.color) return parentConfig.color;
+      }
+      return null;
+    },
+    [itemColors],
+  );
 
   const handleClick = useCallback(() => {
     onToggleCollapse(folder.path);
@@ -341,23 +437,43 @@ const FolderItemComponent = memo(function FolderItem({
             className={`flex items-center gap-1.5 py-1.5 cursor-pointer rounded-md select-none transition-colors ${
               isOver
                 ? "bg-accent/10 ring-1 ring-accent"
-                : isFocused
-                  ? "bg-bg-muted/50 ring-1 ring-text-muted/30"
-                  : "hover:bg-bg-muted"
+                : isColored
+                  ? isFocused
+                    ? "ring-1 ring-text/30"
+                    : "hover:opacity-80"
+                  : isFocused
+                    ? "bg-bg-muted/50 ring-1 ring-text-muted/30"
+                    : "hover:bg-bg-muted"
             }`}
-            style={{ paddingLeft: `${depth * 12 + 8}px`, paddingRight: "8px" }}
+            style={{
+              paddingLeft: `${depth * 12 + 8}px`,
+              paddingRight: "8px",
+              ...(isColored
+                ? { backgroundColor: folderColor!, color: contrastColor! }
+                : {}),
+            }}
             onClick={handleClick}
             role="button"
             tabIndex={-1}
           >
             {isCollapsed ? (
-              <ChevronRightIcon className="w-4 h-4 stroke-[1.6] text-text-muted/60 shrink-0" />
+              <ChevronRightIcon className={`w-4 h-4 stroke-[1.6] shrink-0 ${isColored ? "opacity-70" : "text-text-muted/60"}`} />
             ) : (
-              <ChevronDownIcon className="w-4 h-4 stroke-[1.6] text-text-muted/60 shrink-0" />
+              <ChevronDownIcon className={`w-4 h-4 stroke-[1.6] shrink-0 ${isColored ? "opacity-70" : "text-text-muted/60"}`} />
             )}
-            <span className="text-sm text-text-muted truncate">
-              {folder.name}
-            </span>
+            {folderConfig?.icon && (
+              <span className="text-sm shrink-0 leading-none">{folderConfig.icon}</span>
+            )}
+            <div className="flex flex-col min-w-0">
+              <span className={`text-sm truncate ${isColored ? "" : "text-text-muted"} ${folderConfig?.bold ? "font-bold" : ""}`}>
+                {folder.name}
+              </span>
+              {folderConfig?.description && (
+                <span className={`text-xs truncate ${isColored ? "opacity-70" : "text-text-muted"}`}>
+                  {folderConfig.description}
+                </span>
+              )}
+            </div>
           </div>
 
           {!isCollapsed && (
@@ -385,6 +501,8 @@ const FolderItemComponent = memo(function FolderItem({
                   onMoveNote={onMoveNote}
                   onMoveNoteToParent={onMoveNoteToParent}
                   onMoveFolderToParent={onMoveFolderToParent}
+                  itemColors={itemColors}
+                  onConfigure={onConfigure}
                 />
               ))}
               {folder.notes.map((note) => (
@@ -403,6 +521,9 @@ const FolderItemComponent = memo(function FolderItem({
                   onMove={onMoveNote}
                   onMoveToParent={onMoveNoteToParent}
                   focusedItemKey={focusedItemKey}
+                  itemColor={getColorForNote(note.id)}
+                  itemConfig={itemColors[note.id] ?? null}
+                  onConfigure={onConfigure}
                 />
               ))}
               {isEmpty && (
@@ -473,6 +594,16 @@ const FolderItemComponent = memo(function FolderItem({
           )}
           <ContextMenu.Separator className={menuSeparatorClass} />
           <ContextMenu.Item
+            className={menuItemClass}
+            onSelect={() =>
+              onConfigure(folder.path, folder.name, "folder")
+            }
+          >
+            <SettingsIcon className="w-4 h-4 stroke-[1.6]" />
+            Configure
+          </ContextMenu.Item>
+          <ContextMenu.Separator className={menuSeparatorClass} />
+          <ContextMenu.Item
             className={
               menuItemClass +
               " text-red-500 hover:text-red-500 focus:text-red-500"
@@ -496,6 +627,7 @@ interface FolderTreeViewProps {
   lastClickedNoteId: string | null;
   setLastClickedNoteId: React.Dispatch<React.SetStateAction<string | null>>;
   onMoveNote: (id: string) => void;
+  onSettingsChange: (settings: Settings) => void;
 }
 
 export function FolderTreeView({
@@ -506,6 +638,7 @@ export function FolderTreeView({
   lastClickedNoteId,
   setLastClickedNoteId,
   onMoveNote,
+  onSettingsChange,
 }: FolderTreeViewProps) {
   const {
     notes,
@@ -536,7 +669,60 @@ export function FolderTreeView({
   const [noteToDelete, setNoteToDelete] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [knownFolders, setKnownFolders] = useState<string[]>([]);
+  const [configDialogOpen, setConfigDialogOpen] = useState(false);
+  const [configItemPath, setConfigItemPath] = useState("");
+  const [configItemName, setConfigItemName] = useState("");
+  const [configItemType, setConfigItemType] = useState<"folder" | "note">("folder");
   const containerRef = useRef<HTMLDivElement>(null);
+
+  const itemColors = useMemo(
+    () => _settings?.itemColors ?? {},
+    [_settings?.itemColors],
+  );
+
+  const handleOpenConfigure = useCallback(
+    (path: string, name: string, type: "folder" | "note") => {
+      setConfigItemPath(path);
+      setConfigItemName(name);
+      setConfigItemType(type);
+      setConfigDialogOpen(true);
+    },
+    [],
+  );
+
+  const handleSaveItemColor = useCallback(
+    (path: string, config: ItemColorConfig | null) => {
+      if (!_settings) return;
+      const newItemColors = { ...(_settings.itemColors ?? {}) };
+      if (config) {
+        newItemColors[path] = config;
+      } else {
+        delete newItemColors[path];
+      }
+      const newSettings = {
+        ..._settings,
+        itemColors: Object.keys(newItemColors).length > 0 ? newItemColors : undefined,
+      };
+      notesService.updateSettings(newSettings).then(() => {
+        onSettingsChange(newSettings);
+      });
+    },
+    [_settings, onSettingsChange],
+  );
+
+  const handleRenameItem = useCallback(
+    async (oldPath: string, newName: string) => {
+      if (configItemType === "folder") {
+        await renameFolder(oldPath, newName);
+      } else {
+        const newId = await notesService.renameNote(oldPath, newName);
+        if (selectedNoteId === oldPath) {
+          selectNote(newId);
+        }
+      }
+    },
+    [configItemType, renameFolder, selectedNoteId, selectNote],
+  );
 
   // Load known folders from disk (includes empty folders)
   useEffect(() => {
@@ -889,6 +1075,9 @@ export function FolderTreeView({
             onDelete={openDeleteNoteDialog}
             onMove={onMoveNote}
             focusedItemKey={focusedItemKey}
+            itemColor={itemColors[note.id]?.color ?? null}
+            itemConfig={itemColors[note.id] ?? null}
+            onConfigure={handleOpenConfigure}
           />
         ))}
 
@@ -916,6 +1105,8 @@ export function FolderTreeView({
             onMoveNote={onMoveNote}
             onMoveNoteToParent={moveNote}
             onMoveFolderToParent={moveFolder}
+            itemColors={itemColors}
+            onConfigure={handleOpenConfigure}
           />
         ))}
 
@@ -935,6 +1126,9 @@ export function FolderTreeView({
             onDelete={openDeleteNoteDialog}
             onMove={onMoveNote}
             focusedItemKey={focusedItemKey}
+            itemColor={itemColors[note.id]?.color ?? null}
+            itemConfig={itemColors[note.id] ?? null}
+            onConfigure={handleOpenConfigure}
           />
         ))}
       </div>
@@ -1012,6 +1206,18 @@ export function FolderTreeView({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* Item config dialog */}
+      <ItemConfigDialog
+        open={configDialogOpen}
+        onOpenChange={setConfigDialogOpen}
+        itemPath={configItemPath}
+        itemName={configItemName}
+        itemType={configItemType}
+        currentConfig={itemColors[configItemPath] ?? null}
+        onSave={handleSaveItemColor}
+        onRename={handleRenameItem}
+      />
     </>
   );
 }

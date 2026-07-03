@@ -143,6 +143,23 @@ pub struct Settings {
     pub custom_colors_light: Option<std::collections::HashMap<String, String>>,
     #[serde(rename = "customColorsDark")]
     pub custom_colors_dark: Option<std::collections::HashMap<String, String>>,
+    #[serde(rename = "itemColors")]
+    pub item_colors: Option<std::collections::HashMap<String, ItemColorConfig>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemColorConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub apply_to_children: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bold: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 // Search result
@@ -1513,7 +1530,25 @@ async fn rename_folder(
                 }
             }
         }
-        // Save settings
+        if let Some(ref mut item_colors) = settings.item_colors {
+            let updates: Vec<(String, String)> = item_colors
+                .keys()
+                .filter(|k| *k == &old_path || k.starts_with(&old_prefix))
+                .map(|k| {
+                    let new_key = if *k == old_path {
+                        new_path.clone()
+                    } else {
+                        format!("{}{}", new_prefix, &k[old_prefix.len()..])
+                    };
+                    (k.clone(), new_key)
+                })
+                .collect();
+            for (old_key, new_key) in updates {
+                if let Some(config) = item_colors.remove(&old_key) {
+                    item_colors.insert(new_key, config);
+                }
+            }
+        }
         let _ = save_settings(&folder, &settings);
     }
 
@@ -1602,7 +1637,7 @@ async fn move_note(
         .await
         .map_err(|e| e.to_string())?;
 
-    // Update pinned note IDs
+    // Update pinned note IDs and item colors
     {
         let mut settings = state.settings.write().expect("settings write lock");
         if let Some(ref mut pinned) = settings.pinned_note_ids {
@@ -1610,6 +1645,11 @@ async fn move_note(
                 if *pin_id == id {
                     *pin_id = new_id.clone();
                 }
+            }
+        }
+        if let Some(ref mut item_colors) = settings.item_colors {
+            if let Some(config) = item_colors.remove(&id) {
+                item_colors.insert(new_id.clone(), config);
             }
         }
         let _ = save_settings(&folder, &settings);
@@ -1625,6 +1665,97 @@ async fn move_note(
     }
 
     // Rebuild search index
+    {
+        let index = state.search_index.lock().expect("search index mutex");
+        if let Some(ref search_index) = *index {
+            let ignored_dirs = {
+                let settings = state.settings.read().expect("settings read lock");
+                get_effective_ignored_dirs(&settings)
+            };
+            let _ = search_index.rebuild_index(&folder_root, &ignored_dirs);
+        }
+    }
+
+    Ok(new_id)
+}
+
+#[tauri::command]
+async fn rename_note(
+    id: String,
+    new_name: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let folder = {
+        let app_config = state.app_config.read().expect("app_config read lock");
+        app_config
+            .notes_folder
+            .clone()
+            .ok_or("Notes folder not set")?
+    };
+    let folder_root = PathBuf::from(&folder);
+    let source_path = abs_path_from_id(&folder_root, &id)?;
+
+    if !source_path.exists() {
+        return Err("Note not found".to_string());
+    }
+
+    let sanitized_name = new_name
+        .replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "-")
+        .trim()
+        .to_string();
+    if sanitized_name.is_empty() {
+        return Err("Name cannot be empty".to_string());
+    }
+
+    let parent_folder = if id.contains('/') {
+        &id[..id.rfind('/').unwrap()]
+    } else {
+        ""
+    };
+    let new_id = if parent_folder.is_empty() {
+        sanitized_name.clone()
+    } else {
+        format!("{}/{}", parent_folder, sanitized_name)
+    };
+
+    if new_id == id {
+        return Ok(id);
+    }
+
+    let dest_path = abs_path_from_id(&folder_root, &new_id)?;
+    if dest_path.exists() {
+        return Err("A note with that name already exists".to_string());
+    }
+
+    tokio::fs::rename(&source_path, &dest_path)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    {
+        let mut settings = state.settings.write().expect("settings write lock");
+        if let Some(ref mut pinned) = settings.pinned_note_ids {
+            for pin_id in pinned.iter_mut() {
+                if *pin_id == id {
+                    *pin_id = new_id.clone();
+                }
+            }
+        }
+        if let Some(ref mut item_colors) = settings.item_colors {
+            if let Some(config) = item_colors.remove(&id) {
+                item_colors.insert(new_id.clone(), config);
+            }
+        }
+        let _ = save_settings(&folder, &settings);
+    }
+
+    {
+        let mut cache = state.notes_cache.write().expect("cache write lock");
+        if let Some(mut meta) = cache.remove(&id) {
+            meta.id = new_id.clone();
+            cache.insert(new_id.clone(), meta);
+        }
+    }
+
     {
         let index = state.search_index.lock().expect("search index mutex");
         if let Some(ref search_index) = *index {
@@ -1707,13 +1838,32 @@ async fn move_folder(
         .await
         .map_err(|e| e.to_string())?;
 
-    // Update pinned note IDs
+    // Update pinned note IDs and item colors
     {
         let mut settings = state.settings.write().expect("settings write lock");
         if let Some(ref mut pinned) = settings.pinned_note_ids {
             for pin_id in pinned.iter_mut() {
                 if pin_id.starts_with(&old_prefix) {
                     *pin_id = format!("{}{}", new_prefix, &pin_id[old_prefix.len()..]);
+                }
+            }
+        }
+        if let Some(ref mut item_colors) = settings.item_colors {
+            let updates: Vec<(String, String)> = item_colors
+                .keys()
+                .filter(|k| *k == &path || k.starts_with(&old_prefix))
+                .map(|k| {
+                    let new_key = if *k == path {
+                        new_path.clone()
+                    } else {
+                        format!("{}{}", new_prefix, &k[old_prefix.len()..])
+                    };
+                    (k.clone(), new_key)
+                })
+                .collect();
+            for (old_key, new_key) in updates {
+                if let Some(config) = item_colors.remove(&old_key) {
+                    item_colors.insert(new_key, config);
                 }
             }
         }
@@ -4644,6 +4794,7 @@ pub fn run() {
             delete_folder,
             rename_folder,
             move_note,
+            rename_note,
             move_folder,
             get_settings,
             update_settings,
