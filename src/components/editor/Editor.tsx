@@ -1587,8 +1587,9 @@ export function Editor({
 
       if (!tr.docChanged) return;
 
+      // Don't focus the editor here: it would steal focus from the search
+      // toolbar and break repeated Enter-to-replace on subsequent matches
       editor.view.dispatch(tr.scrollIntoView());
-      editor.commands.focus();
       requestAnimationFrame(() => refreshSearchMatches(preferredFrom));
     },
     [
