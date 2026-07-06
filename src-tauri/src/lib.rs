@@ -4839,6 +4839,7 @@ pub fn run() {
             uninstall_cli,
             get_cli_status,
             set_title_bar_theme,
+            get_build_date,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -4916,6 +4917,11 @@ mod windows_title_bar {
             );
         }
     }
+}
+
+#[tauri::command]
+fn get_build_date() -> String {
+    env!("BUILD_DATE").to_string()
 }
 
 #[tauri::command]
