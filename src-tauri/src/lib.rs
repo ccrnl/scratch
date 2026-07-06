@@ -4666,6 +4666,31 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            // Customize the native macOS "About Scratch" panel so it shows the
+            // build date next to the version: "Version 0.10.1 (YYYY-MM-DD HH:MM:SS UTC)"
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::menu::{AboutMetadataBuilder, PredefinedMenuItem};
+                if let Some(menu) = app.menu() {
+                    if let Some(app_submenu) = menu
+                        .items()
+                        .ok()
+                        .and_then(|items| items.first().and_then(|i| i.as_submenu().cloned()))
+                    {
+                        let metadata = AboutMetadataBuilder::new()
+                            .short_version(Some(app.package_info().version.to_string()))
+                            .version(Some(env!("BUILD_DATE")))
+                            .build();
+                        if let Ok(about) =
+                            PredefinedMenuItem::about(app.handle(), None, Some(metadata))
+                        {
+                            let _ = app_submenu.remove_at(0);
+                            let _ = app_submenu.insert(&about, 0);
+                        }
+                    }
+                }
+            }
+
             // Load app config on startup (contains notes folder path)
             let mut app_config = load_app_config(app.handle());
 
