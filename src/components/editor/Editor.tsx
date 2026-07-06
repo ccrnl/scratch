@@ -3,7 +3,10 @@ import {
   useLayoutEffect,
   useRef,
   useCallback,
+  useMemo,
   useState,
+  type CSSProperties,
+  type ReactNode,
 } from "react";
 import {
   useEditor,
@@ -350,6 +353,71 @@ function getReplacementText(
   if (!options.useRegex) return replacement;
   return expandRegexReplacement(replacement, match);
 }
+
+// Plain-text variant of match finding, used by source (markdown) mode
+function findMatchesInText(
+  text: string,
+  query: string,
+  options: SearchOptions,
+): SearchResult {
+  if (query.length === 0) {
+    return { matches: [], error: null };
+  }
+
+  const { regex, error } = createSearchRegExp(query, options);
+  if (error || !regex) {
+    return { matches: [], error };
+  }
+
+  const matches: SearchMatch[] = [];
+  regex.lastIndex = 0;
+
+  let result: RegExpExecArray | null;
+  while (matches.length < MAX_SEARCH_MATCHES && (result = regex.exec(text))) {
+    const matchText = result[0];
+    if (matchText.length === 0) {
+      regex.lastIndex = advanceRegexIndex(text, regex.lastIndex);
+      continue;
+    }
+
+    const index = result.index;
+    if (options.wholeWord && !isWholeWordMatch(text, index, matchText.length)) {
+      continue;
+    }
+
+    // Bound prefix/suffix to the match's line (mirrors per-node behavior)
+    const lineStart = text.lastIndexOf("\n", Math.max(0, index - 1)) + 1;
+    const lineEndIndex = text.indexOf("\n", index + matchText.length);
+    const lineEnd = lineEndIndex === -1 ? text.length : lineEndIndex;
+
+    matches.push({
+      from: index,
+      to: index + matchText.length,
+      text: matchText,
+      captures: result.slice(1).map((value) => value ?? ""),
+      groups: result.groups ? { ...result.groups } : undefined,
+      prefix: text.slice(lineStart, index),
+      suffix: text.slice(index + matchText.length, lineEnd),
+    });
+  }
+
+  return { matches, error: null };
+}
+
+function sourceSearchKey(query: string, options: SearchOptions): string {
+  return `${options.matchCase ? 1 : 0}${options.wholeWord ? 1 : 0}${options.useRegex ? 1 : 0}:${query}`;
+}
+
+// Shared text metrics for the source textarea and its highlight mirror —
+// both must render text identically for highlight alignment.
+const SOURCE_EDITOR_STYLE: CSSProperties = {
+  maxWidth: "var(--editor-max-width, 48rem)",
+  fontFamily:
+    "ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Monaco, 'Courier New', monospace",
+  fontSize: "0.875em",
+  lineHeight: "var(--editor-line-height)",
+  tabSize: 2,
+};
 
 const SearchHighlight = Extension.create<SearchHighlightOptions>({
   name: "searchHighlight",
@@ -755,6 +823,11 @@ export function Editor({
   const [sourceMode, setSourceMode] = useState(false);
   const [sourceContent, setSourceContent] = useState("");
   const sourceTimeoutRef = useRef<number | null>(null);
+  const sourceTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const sourceMirrorRef = useRef<HTMLDivElement | null>(null);
+  // Incremented to request scrolling the active source match into view after render
+  const [sourceScrollTick, setSourceScrollTick] = useState(0);
+  const lastSourceSearchKeyRef = useRef<string | null>(null);
   const sourceModeTransitionRef = useRef<{
     topBlockIndex: number;
     cursorBlockIndex: number;
@@ -1518,23 +1591,43 @@ export function Editor({
 
   // Search navigation functions (defined after editor is created)
   const goToNextMatch = useCallback(() => {
-    if (searchMatches.length === 0 || !editor) return;
+    if (searchMatches.length === 0) return;
     const nextIndex = (currentMatchIndex + 1) % searchMatches.length;
     setCurrentMatchIndex(nextIndex);
-    updateSearchDecorations(searchMatches, nextIndex, editor);
-  }, [searchMatches, currentMatchIndex, editor, updateSearchDecorations]);
+    if (sourceMode) {
+      setSourceScrollTick((tick) => tick + 1);
+    } else if (editor) {
+      updateSearchDecorations(searchMatches, nextIndex, editor);
+    }
+  }, [
+    searchMatches,
+    currentMatchIndex,
+    editor,
+    sourceMode,
+    updateSearchDecorations,
+  ]);
 
   const goToPreviousMatch = useCallback(() => {
-    if (searchMatches.length === 0 || !editor) return;
+    if (searchMatches.length === 0) return;
     const prevIndex =
       (currentMatchIndex - 1 + searchMatches.length) % searchMatches.length;
     setCurrentMatchIndex(prevIndex);
-    updateSearchDecorations(searchMatches, prevIndex, editor);
-  }, [searchMatches, currentMatchIndex, editor, updateSearchDecorations]);
+    if (sourceMode) {
+      setSourceScrollTick((tick) => tick + 1);
+    } else if (editor) {
+      updateSearchDecorations(searchMatches, prevIndex, editor);
+    }
+  }, [
+    searchMatches,
+    currentMatchIndex,
+    editor,
+    sourceMode,
+    updateSearchDecorations,
+  ]);
 
   const refreshSearchMatches = useCallback(
     (preferredFrom = 0) => {
-      if (!editor) return;
+      if (!editor || sourceMode) return;
 
       if (searchQuery.length === 0) {
         setSearchMatches([]);
@@ -1561,6 +1654,7 @@ export function Editor({
       findMatches,
       searchOptions,
       searchQuery,
+      sourceMode,
       updateSearchDecorations,
     ],
   );
@@ -1570,9 +1664,64 @@ export function Editor({
     setSearchQuery(query);
   }, []);
 
+  // Auto-save in source mode with debounce
+  const handleSourceChange = useCallback(
+    (value: string) => {
+      setSourceContent(value);
+      if (sourceTimeoutRef.current) {
+        clearTimeout(sourceTimeoutRef.current);
+      }
+      sourceTimeoutRef.current = window.setTimeout(async () => {
+        if (currentNote) {
+          setIsSaving(true);
+          try {
+            lastSaveRef.current = { noteId: currentNote.id, content: value };
+            await saveNote(value, currentNote.id);
+          } catch (error) {
+            console.error("Failed to save note:", error);
+            toast.error("Failed to save note");
+          } finally {
+            setIsSaving(false);
+          }
+        }
+      }, 300);
+    },
+    [currentNote, saveNote],
+  );
+
   const replaceSearchMatches = useCallback(
     (matches: SearchMatch[], preferredFrom = 0) => {
-      if (!editor || matches.length === 0 || searchError) return;
+      if (matches.length === 0 || searchError) return;
+
+      if (sourceMode) {
+        let next = sourceContent;
+        [...matches]
+          .sort((a, b) => b.from - a.from)
+          .forEach((match) => {
+            next =
+              next.slice(0, match.from) +
+              getReplacementText(match, replaceQuery, searchOptions) +
+              next.slice(match.to);
+          });
+
+        if (next === sourceContent) return;
+
+        handleSourceChange(next);
+        // Recompute immediately so match offsets stay valid for chained replaces
+        const result = findMatchesInText(next, searchQuery, searchOptions);
+        const nextIndex = result.matches.findIndex(
+          (match) => match.from >= preferredFrom,
+        );
+        setSearchMatches(result.matches);
+        setSearchError(result.error);
+        setCurrentMatchIndex(
+          result.matches.length === 0 ? 0 : nextIndex === -1 ? 0 : nextIndex,
+        );
+        setSourceScrollTick((tick) => tick + 1);
+        return;
+      }
+
+      if (!editor) return;
 
       const tr = editor.state.tr;
       [...matches]
@@ -1594,10 +1743,14 @@ export function Editor({
     },
     [
       editor,
+      handleSourceChange,
       refreshSearchMatches,
       replaceQuery,
       searchError,
       searchOptions,
+      searchQuery,
+      sourceContent,
+      sourceMode,
     ],
   );
 
@@ -1621,6 +1774,24 @@ export function Editor({
     replaceSearchMatches(searchMatches, 0);
   }, [replaceSearchMatches, searchError, searchMatches]);
 
+  // Close search and restore focus to the active editing surface
+  const closeSearch = useCallback(() => {
+    setSearchOpen(false);
+    setSearchQuery("");
+    setReplaceQuery("");
+    setSearchMatches([]);
+    setSearchError(null);
+    setCurrentMatchIndex(0);
+    lastSourceSearchKeyRef.current = null;
+    if (sourceMode) {
+      sourceTextareaRef.current?.focus();
+    } else if (editor) {
+      // Clear decorations and refocus editor
+      updateSearchDecorations([], 0, editor);
+      editor.commands.focus();
+    }
+  }, [editor, sourceMode, updateSearchDecorations]);
+
   // Debounced search effect
   useEffect(() => {
     if (searchQuery.length === 0) {
@@ -1634,6 +1805,100 @@ export function Editor({
 
     return () => clearTimeout(timer);
   }, [refreshSearchMatches, searchQuery]);
+
+  // Debounced search effect for source mode — recomputes on query, options,
+  // and content changes (offsets must stay in sync with the textarea text)
+  useEffect(() => {
+    if (!sourceMode || !searchOpen) return;
+
+    if (searchQuery.length === 0) {
+      lastSourceSearchKeyRef.current = null;
+      setSearchMatches([]);
+      setSearchError(null);
+      setCurrentMatchIndex(0);
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      const key = sourceSearchKey(searchQuery, searchOptions);
+      const queryChanged = lastSourceSearchKeyRef.current !== key;
+      lastSourceSearchKeyRef.current = key;
+
+      const result = findMatchesInText(sourceContent, searchQuery, searchOptions);
+      setSearchMatches(result.matches);
+      setSearchError(result.error);
+      setCurrentMatchIndex((prev) =>
+        result.matches.length === 0
+          ? 0
+          : Math.min(prev, result.matches.length - 1),
+      );
+      // Scroll to the active match only when the search itself changed,
+      // not when the user is typing in the textarea
+      if (queryChanged && result.matches.length > 0) {
+        setSourceScrollTick((tick) => tick + 1);
+      }
+    }, 150);
+
+    return () => clearTimeout(timer);
+  }, [sourceMode, searchOpen, searchQuery, searchOptions, sourceContent]);
+
+  // Keep the source highlight mirror scroll-synced with the textarea
+  const syncSourceScroll = useCallback(() => {
+    const textarea = sourceTextareaRef.current;
+    const mirror = sourceMirrorRef.current;
+    if (!textarea || !mirror) return;
+    mirror.scrollTop = textarea.scrollTop;
+    mirror.scrollLeft = textarea.scrollLeft;
+  }, []);
+
+  // Scroll the active source match into view (runs after marks render)
+  useEffect(() => {
+    if (!sourceMode || sourceScrollTick === 0) return;
+    const textarea = sourceTextareaRef.current;
+    const mark = sourceMirrorRef.current?.querySelector<HTMLElement>(
+      ".search-match-active",
+    );
+    if (!textarea || !mark) return;
+    textarea.scrollTop = Math.max(
+      0,
+      mark.offsetTop - textarea.clientHeight / 2,
+    );
+    textarea.scrollLeft = Math.max(
+      0,
+      mark.offsetLeft - textarea.clientWidth / 2,
+    );
+    syncSourceScroll();
+  }, [sourceScrollTick, sourceMode, syncSourceScroll]);
+
+  // Re-sync mirror scroll whenever its content re-renders (e.g. mount, match updates)
+  useEffect(() => {
+    if (sourceMode && searchOpen) syncSourceScroll();
+  }, [sourceMode, searchOpen, searchMatches, currentMatchIndex, syncSourceScroll]);
+
+  // Highlighted segments rendered in the mirror behind the source textarea
+  const sourceHighlightSegments = useMemo<ReactNode[] | null>(() => {
+    if (!sourceMode || !searchOpen || searchMatches.length === 0) return null;
+    const segments: ReactNode[] = [];
+    let last = 0;
+    searchMatches.forEach((match, index) => {
+      if (match.from > last) {
+        segments.push(sourceContent.slice(last, match.from));
+      }
+      segments.push(
+        <span
+          key={index}
+          className={
+            index === currentMatchIndex ? "search-match-active" : "search-match"
+          }
+        >
+          {sourceContent.slice(match.from, match.to)}
+        </span>,
+      );
+      last = match.to;
+    });
+    segments.push(sourceContent.slice(last));
+    return segments;
+  }, [sourceMode, searchOpen, searchMatches, currentMatchIndex, sourceContent]);
 
   // Handle clicks on wikilinks and external links
   useEffect(() => {
@@ -2075,10 +2340,12 @@ export function Editor({
         const target = e.target as HTMLElement;
         const tagName = target.tagName.toLowerCase();
 
-        // Don't intercept if user is in an input/textarea (except the editor itself)
+        // Don't intercept if user is in an input/textarea
+        // (except the editor itself or the markdown source textarea)
         if (
           (tagName === "input" || tagName === "textarea") &&
-          !target.closest(".ProseMirror")
+          !target.closest(".ProseMirror") &&
+          target !== sourceTextareaRef.current
         ) {
           return;
         }
@@ -2349,30 +2616,14 @@ export function Editor({
     return () => window.removeEventListener("toggle-source-mode", handler);
   }, [toggleSourceMode]);
 
-  // Auto-save in source mode with debounce
-  const handleSourceChange = useCallback(
-    (value: string) => {
-      setSourceContent(value);
-      if (sourceTimeoutRef.current) {
-        clearTimeout(sourceTimeoutRef.current);
-      }
-      sourceTimeoutRef.current = window.setTimeout(async () => {
-        if (currentNote) {
-          setIsSaving(true);
-          try {
-            lastSaveRef.current = { noteId: currentNote.id, content: value };
-            await saveNote(value, currentNote.id);
-          } catch (error) {
-            console.error("Failed to save note:", error);
-            toast.error("Failed to save note");
-          } finally {
-            setIsSaving(false);
-          }
-        }
-      }, 300);
-    },
-    [currentNote, saveNote],
-  );
+  // Reset search matches when switching modes mid-search — offsets are not
+  // comparable between ProseMirror positions and source text, so force a
+  // fresh computation (and scroll) in the new mode
+  useEffect(() => {
+    lastSourceSearchKeyRef.current = null;
+    setSearchMatches([]);
+    setCurrentMatchIndex(0);
+  }, [sourceMode]);
 
   if (!currentNote) {
     // Preview mode: show loading state (content not yet loaded)
@@ -2456,6 +2707,26 @@ export function Editor({
       </div>
     );
   }
+
+  const searchToolbar = searchOpen ? (
+    <SearchToolbar
+      inputRef={searchInputRef}
+      query={searchQuery}
+      replaceQuery={replaceQuery}
+      onChange={handleSearchChange}
+      onReplaceChange={setReplaceQuery}
+      onNext={goToNextMatch}
+      onPrevious={goToPreviousMatch}
+      onReplace={replaceCurrentMatch}
+      onReplaceAll={replaceAllMatches}
+      options={searchOptions}
+      onOptionsChange={setSearchOptions}
+      onClose={closeSearch}
+      currentMatch={searchMatches.length === 0 ? 0 : currentMatchIndex + 1}
+      totalMatches={searchMatches.length}
+      error={searchError}
+    />
+  ) : null;
 
   return (
     <div className="flex-1 flex flex-col bg-bg overflow-hidden">
@@ -2682,62 +2953,45 @@ export function Editor({
           dir={textDirection}
         >
           {sourceMode ? (
-            /* Markdown source textarea */
-            <div className="h-full">
+            /* Markdown source textarea with search highlight mirror */
+            <div className="h-full relative">
+              {sourceHighlightSegments && (
+                <div
+                  aria-hidden
+                  className="absolute inset-0 pointer-events-none"
+                  dir={textDirection}
+                >
+                  <div
+                    ref={sourceMirrorRef}
+                    className="relative w-full h-full text-transparent px-6 pt-8 pb-24 mx-auto block overflow-hidden"
+                    style={{ ...SOURCE_EDITOR_STYLE, whiteSpace: "pre" }}
+                  >
+                    {sourceHighlightSegments}
+                  </div>
+                </div>
+              )}
               <textarea
+                ref={sourceTextareaRef}
                 value={sourceContent}
                 onChange={(e) => handleSourceChange(e.target.value)}
+                onScroll={syncSourceScroll}
                 wrap="off"
                 dir={textDirection}
-                className="w-full h-full bg-transparent text-text focus:outline-none resize-none px-6 pt-8 pb-24 mx-auto block"
-                style={{
-                  maxWidth: "var(--editor-max-width, 48rem)",
-                  fontFamily:
-                    "ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Monaco, 'Courier New', monospace",
-                  fontSize: "0.875em",
-                  lineHeight: "var(--editor-line-height)",
-                  tabSize: 2,
-                }}
+                className="relative w-full h-full bg-transparent text-text focus:outline-none resize-none px-6 pt-8 pb-24 mx-auto block"
+                style={SOURCE_EDITOR_STYLE}
                 spellCheck={false}
               />
+              {searchOpen && (
+                <div className="absolute top-2 right-2 z-10 animate-in fade-in slide-in-from-top-4 duration-200">
+                  {searchToolbar}
+                </div>
+              )}
             </div>
           ) : (
             <>
               {searchOpen && (
                 <div className="sticky top-2 z-10 animate-in fade-in slide-in-from-top-4 duration-200 pointer-events-none pr-2 flex justify-end">
-                  <div className="pointer-events-auto">
-                    <SearchToolbar
-                      inputRef={searchInputRef}
-                      query={searchQuery}
-                      replaceQuery={replaceQuery}
-                      onChange={handleSearchChange}
-                      onReplaceChange={setReplaceQuery}
-                      onNext={goToNextMatch}
-                      onPrevious={goToPreviousMatch}
-                      onReplace={replaceCurrentMatch}
-                      onReplaceAll={replaceAllMatches}
-                      options={searchOptions}
-                      onOptionsChange={setSearchOptions}
-                      onClose={() => {
-                        setSearchOpen(false);
-                        setSearchQuery("");
-                        setReplaceQuery("");
-                        setSearchMatches([]);
-                        setSearchError(null);
-                        setCurrentMatchIndex(0);
-                        // Clear decorations and refocus editor
-                        if (editor) {
-                          updateSearchDecorations([], 0, editor);
-                          editor.commands.focus();
-                        }
-                      }}
-                      currentMatch={
-                        searchMatches.length === 0 ? 0 : currentMatchIndex + 1
-                      }
-                      totalMatches={searchMatches.length}
-                      error={searchError}
-                    />
-                  </div>
+                  <div className="pointer-events-auto">{searchToolbar}</div>
                 </div>
               )}
               <div
