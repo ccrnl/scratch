@@ -48,6 +48,10 @@ import {
   parseStreamLine,
   supportsStreaming,
   type AiStreamEvent,
+  type AiUsage,
+  describeUsage,
+  formatUsage,
+  sumUsage,
 } from "../../services/aiStream";
 import { parseMarkdown } from "./markdown";
 
@@ -84,6 +88,7 @@ interface Run {
   steps: Step[];
   output: string;
   error: string | null;
+  usage: AiUsage | null;
 }
 
 const providerIcons: Record<AiProvider, typeof ClaudeIcon> = {
@@ -171,6 +176,14 @@ function RunCard({ run }: { run: Run }) {
             <p className="text-xs text-red-500">
               {run.error || "Something went wrong"}
             </p>
+          )}
+
+          {run.status !== "running" && run.usage && (
+            <Tooltip content={describeUsage(run.usage)}>
+              <div className="text-[11px] tabular-nums text-text-muted/60 pt-0.5">
+                {formatUsage(run.usage)}
+              </div>
+            </Tooltip>
           )}
 
           {run.status === "done" && (
@@ -317,8 +330,19 @@ export function AiSidebar({
 
   if (!open) return null;
 
+  const measuredRuns = runs.flatMap((run) => (run.usage ? [run.usage] : []));
+  const sessionUsage = measuredRuns.length > 0 ? sumUsage(measuredRuns) : null;
+
   const appendStep = (runId: string, event: AiStreamEvent) => {
-    if (event.kind === "done") return;
+    if (event.kind === "done") {
+      if (event.usage) {
+        const usage = event.usage;
+        setRuns((current) =>
+          current.map((run) => (run.id === runId ? { ...run, usage } : run)),
+        );
+      }
+      return;
+    }
     setRuns((current) =>
       current.map((run) =>
         run.id === runId
@@ -357,6 +381,7 @@ export function AiSidebar({
         steps: [],
         output: "",
         error: null,
+        usage: null,
       },
     ]);
 
@@ -451,6 +476,15 @@ export function AiSidebar({
           runs.map((run) => <RunCard key={run.id} run={run} />)
         )}
       </div>
+
+      {sessionUsage && (
+        <div className="shrink-0 border-t border-border px-3 py-1.5 text-[11px] tabular-nums text-text-muted/70 flex items-center justify-between">
+          <span>Session</span>
+          <Tooltip content={describeUsage(sessionUsage)}>
+            <span>{formatUsage(sessionUsage)}</span>
+          </Tooltip>
+        </div>
+      )}
 
       <div className="shrink-0 border-t border-border p-3">
         <div className="rounded-lg border border-border bg-bg focus-within:border-text-muted/50 transition-colors">

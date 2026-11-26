@@ -9,10 +9,102 @@ export function supportsStreaming(provider: AiProvider): boolean {
   return STREAMING_PROVIDERS.includes(provider);
 }
 
+// What a run consumed, as reported by the CLI's final event.
+export interface AiUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  costUsd: number | null;
+  durationMs: number | null;
+}
+
 export type AiStreamEvent =
   | { kind: "text"; text: string }
   | { kind: "tool"; name: string; detail: string }
-  | { kind: "done"; text: string };
+  | { kind: "done"; text: string; usage?: AiUsage };
+
+function count(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function optionalNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function parseClaudeUsage(payload: Record<string, unknown>): AiUsage | undefined {
+  const usage = payload.usage as Record<string, unknown> | undefined;
+  if (!usage || typeof usage !== "object") return undefined;
+  return {
+    inputTokens: count(usage.input_tokens),
+    outputTokens: count(usage.output_tokens),
+    cacheReadTokens: count(usage.cache_read_input_tokens),
+    cacheCreationTokens: count(usage.cache_creation_input_tokens),
+    costUsd: optionalNumber(payload.total_cost_usd),
+    durationMs: optionalNumber(payload.duration_ms),
+  };
+}
+
+// Everything the model read, whether fresh, cached or newly cached.
+export function totalInputTokens(usage: AiUsage): number {
+  return usage.inputTokens + usage.cacheReadTokens + usage.cacheCreationTokens;
+}
+
+function addOptional(a: number | null, b: number | null): number | null {
+  return a === null && b === null ? null : (a ?? 0) + (b ?? 0);
+}
+
+export function sumUsage(usages: AiUsage[]): AiUsage {
+  return usages.reduce<AiUsage>(
+    (sum, usage) => ({
+      inputTokens: sum.inputTokens + usage.inputTokens,
+      outputTokens: sum.outputTokens + usage.outputTokens,
+      cacheReadTokens: sum.cacheReadTokens + usage.cacheReadTokens,
+      cacheCreationTokens: sum.cacheCreationTokens + usage.cacheCreationTokens,
+      costUsd: addOptional(sum.costUsd, usage.costUsd),
+      durationMs: addOptional(sum.durationMs, usage.durationMs),
+    }),
+    {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      costUsd: null,
+      durationMs: null,
+    },
+  );
+}
+
+export function formatTokens(value: number): string {
+  if (value < 1000) return String(value);
+  if (value < 100_000) return `${(value / 1000).toFixed(1).replace(/[.]0$/, "")}k`;
+  return `${Math.round(value / 1000)}k`;
+}
+
+export function formatCost(usd: number): string {
+  return usd > 0 && usd < 0.01 ? "<$0.01" : `$${usd.toFixed(2)}`;
+}
+
+// e.g. "49k in · 4 out · $0.20 · 2.6s"
+export function formatUsage(usage: AiUsage): string {
+  const parts = [
+    `${formatTokens(totalInputTokens(usage))} in`,
+    `${formatTokens(usage.outputTokens)} out`,
+  ];
+  if (usage.costUsd !== null) parts.push(formatCost(usage.costUsd));
+  if (usage.durationMs !== null) parts.push(`${(usage.durationMs / 1000).toFixed(1)}s`);
+  return parts.join(" · ");
+}
+
+export function describeUsage(usage: AiUsage): string {
+  return [
+    `Input: ${usage.inputTokens.toLocaleString()}`,
+    `Cache written: ${usage.cacheCreationTokens.toLocaleString()}`,
+    `Cache read: ${usage.cacheReadTokens.toLocaleString()}`,
+    `Output: ${usage.outputTokens.toLocaleString()}`,
+    "Cost is the CLI's estimate at API prices; a subscription is not billed per token.",
+  ].join("\n");
+}
 
 interface AiStreamLine {
   run_id: string;
@@ -73,6 +165,7 @@ function parseClaudeLine(payload: Record<string, unknown>): AiStreamEvent[] {
     events.push({
       kind: "done",
       text: typeof payload.result === "string" ? payload.result : "",
+      usage: parseClaudeUsage(payload),
     });
   }
 
