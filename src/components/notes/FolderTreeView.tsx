@@ -6,6 +6,7 @@ import {
   buildFolderTree,
   countNotesInFolder,
   getVisibleItems,
+  PINNED_SECTION_KEY,
   type TreeItem,
 } from "../../lib/folderTree";
 import { FolderNameDialog } from "./FolderNameDialog";
@@ -91,6 +92,11 @@ function getFolderColorStyle(hex: string): React.CSSProperties {
   return { backgroundImage: `linear-gradient(to bottom, ${hex}, ${hex}b3)` };
 }
 
+function getNoteFolder(noteId: string): string | null {
+  const lastSlash = noteId.lastIndexOf("/");
+  return lastSlash > 0 ? noteId.substring(0, lastSlash) : null;
+}
+
 // Compact file item for folder tree (VS Code / Obsidian style)
 interface FileItemProps {
   note: NoteMetadata;
@@ -107,6 +113,7 @@ interface FileItemProps {
   onMoveToParent?: (id: string, targetFolder: string) => void;
   focusedItemKey?: string | null;
   itemColor?: string | null;
+  subtitle?: string | null;
   itemConfig?: ItemColorConfig | null;
   onConfigure: (path: string, name: string, type: "folder" | "note") => void;
 }
@@ -126,6 +133,7 @@ const FileItem = memo(function FileItem({
   onMoveToParent,
   focusedItemKey,
   itemColor,
+  subtitle,
   itemConfig,
   onConfigure,
 }: FileItemProps) {
@@ -238,9 +246,9 @@ const FileItem = memo(function FileItem({
             <span className={`text-sm truncate text-text ${itemConfig?.bold ? "font-bold" : ""}`}>
               {cleanTitle(note.title)}
             </span>
-            {itemConfig?.description && (
+            {(itemConfig?.description || subtitle) && (
               <span className="text-xs truncate text-text-muted">
-                {itemConfig.description}
+                {itemConfig?.description || subtitle}
               </span>
             )}
           </div>
@@ -786,10 +794,14 @@ export function FolderTreeView({
   useEffect(
     () =>
       onRevealNote((noteId) => {
+        if (pinnedIds.has(noteId)) {
+          expandFolder(PINNED_SECTION_KEY);
+          return;
+        }
         const lastSlash = noteId.lastIndexOf("/");
         if (lastSlash > 0) expandFolder(noteId.substring(0, lastSlash));
       }),
-    [expandFolder],
+    [expandFolder, pinnedIds],
   );
 
   const handleNewSubfolder = useCallback((parentPath: string) => {
@@ -880,8 +892,8 @@ export function FolderTreeView({
 
   // Flat list of visible items for keyboard navigation
   const visibleItems = useMemo(
-    () => getVisibleItems(tree, pinnedIds, collapsedFolders),
-    [tree, pinnedIds, collapsedFolders],
+    () => getVisibleItems(tree, collapsedFolders),
+    [tree, collapsedFolders],
   );
 
   // Visible note IDs in order (for Shift+Click range computation)
@@ -1053,15 +1065,7 @@ export function FolderTreeView({
     return () => window.removeEventListener("focus-note-list", handleFocus);
   }, [focusedItemKey, visibleItems, selectedNoteId]);
 
-  // Separate pinned and unpinned root notes
-  const pinnedRootNotes = useMemo(
-    () => tree.rootNotes.filter((n) => pinnedIds.has(n.id)),
-    [tree.rootNotes, pinnedIds],
-  );
-  const unpinnedRootNotes = useMemo(
-    () => tree.rootNotes.filter((n) => !pinnedIds.has(n.id)),
-    [tree.rootNotes, pinnedIds],
-  );
+  const pinnedCollapsed = collapsedFolders.has(PINNED_SECTION_KEY);
 
   return (
     <>
@@ -1073,11 +1077,30 @@ export function FolderTreeView({
         className="group/notelist flex flex-col gap-0.5 p-1.5 outline-none"
         onKeyDown={handleKeyDown}
       >
-        {/* Pinned root notes */}
-        {pinnedRootNotes.map((note) => (
+        {tree.pinnedNotes.length > 0 && (
+          <div
+            className="flex items-center gap-1.5 py-1.5 cursor-pointer rounded-md select-none transition-colors hover:bg-bg-muted"
+            style={{ paddingLeft: "8px", paddingRight: "8px" }}
+            onClick={() => handleToggleCollapse(PINNED_SECTION_KEY)}
+            role="button"
+            tabIndex={-1}
+          >
+            {pinnedCollapsed ? (
+              <ChevronRightIcon className="w-4 h-4 stroke-[1.6] shrink-0 text-text-muted/60" />
+            ) : (
+              <ChevronDownIcon className="w-4 h-4 stroke-[1.6] shrink-0 text-text-muted/60" />
+            )}
+            <span className="text-sm text-text-muted">Pinned</span>
+            <span className="text-xs text-text-muted/60">
+              {tree.pinnedNotes.length}
+            </span>
+          </div>
+        )}
+        {!pinnedCollapsed && tree.pinnedNotes.map((note) => (
           <FileItem
             key={note.id}
             note={note}
+            subtitle={getNoteFolder(note.id)}
             depth={0}
             isSelected={selectedNoteId === note.id}
             isMultiSelected={multiSelectedNoteIds.has(note.id)}
@@ -1124,8 +1147,7 @@ export function FolderTreeView({
           />
         ))}
 
-        {/* Unpinned root notes */}
-        {unpinnedRootNotes.map((note) => (
+        {tree.rootNotes.map((note) => (
           <FileItem
             key={note.id}
             note={note}

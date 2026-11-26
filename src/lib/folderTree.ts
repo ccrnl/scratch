@@ -1,6 +1,11 @@
 import type { NoteMetadata, FolderNode } from "../types/note";
 
+// Key under which the collapsed state of the "Pinned" section is stored (cannot clash with a folder path)
+export const PINNED_SECTION_KEY = "\0pinned";
+
 export interface FolderTreeData {
+  // Pinned notes from anywhere in the tree, listed together at the top
+  pinnedNotes: NoteMetadata[];
   rootNotes: NoteMetadata[];
   folders: FolderNode[];
 }
@@ -10,6 +15,7 @@ export function buildFolderTree(
   pinnedIds: Set<string>,
   knownFolders?: string[],
 ): FolderTreeData {
+  const pinnedNotes: NoteMetadata[] = [];
   const rootNotes: NoteMetadata[] = [];
   const folderMap = new Map<string, FolderNode>();
 
@@ -41,6 +47,10 @@ export function buildFolderTree(
   }
 
   for (const note of notes) {
+    if (pinnedIds.has(note.id)) {
+      pinnedNotes.push(note);
+      continue;
+    }
     const lastSlash = note.id.lastIndexOf("/");
     if (lastSlash === -1) {
       rootNotes.push(note);
@@ -53,12 +63,7 @@ export function buildFolderTree(
 
   function sortNode(node: FolderNode) {
     node.children.sort((a, b) => a.name.localeCompare(b.name));
-    node.notes.sort((a, b) => {
-      const ap = pinnedIds.has(a.id);
-      const bp = pinnedIds.has(b.id);
-      if (ap !== bp) return ap ? -1 : 1;
-      return b.modified - a.modified;
-    });
+    node.notes.sort((a, b) => b.modified - a.modified);
     node.children.forEach(sortNode);
   }
 
@@ -68,15 +73,10 @@ export function buildFolderTree(
   topLevelFolders.sort((a, b) => a.name.localeCompare(b.name));
   topLevelFolders.forEach(sortNode);
 
-  // Sort root notes: pinned first, then by modified desc
-  rootNotes.sort((a, b) => {
-    const ap = pinnedIds.has(a.id);
-    const bp = pinnedIds.has(b.id);
-    if (ap !== bp) return ap ? -1 : 1;
-    return b.modified - a.modified;
-  });
+  pinnedNotes.sort((a, b) => b.modified - a.modified);
+  rootNotes.sort((a, b) => b.modified - a.modified);
 
-  return { rootNotes, folders: topLevelFolders };
+  return { pinnedNotes, rootNotes, folders: topLevelFolders };
 }
 
 export type TreeItem =
@@ -86,14 +86,12 @@ export type TreeItem =
 /** Build a flat list of visible tree items in DFS order (for keyboard navigation). */
 export function getVisibleItems(
   tree: FolderTreeData,
-  pinnedIds: Set<string>,
   collapsedFolders: Set<string>,
 ): TreeItem[] {
   const items: TreeItem[] = [];
 
-  // Pinned root notes first
-  for (const note of tree.rootNotes) {
-    if (pinnedIds.has(note.id)) {
+  if (!collapsedFolders.has(PINNED_SECTION_KEY)) {
+    for (const note of tree.pinnedNotes) {
       items.push({ type: "note", id: note.id });
     }
   }
@@ -114,11 +112,8 @@ export function getVisibleItems(
     walkFolder(folder);
   }
 
-  // Unpinned root notes
   for (const note of tree.rootNotes) {
-    if (!pinnedIds.has(note.id)) {
-      items.push({ type: "note", id: note.id });
-    }
+    items.push({ type: "note", id: note.id });
   }
 
   return items;
