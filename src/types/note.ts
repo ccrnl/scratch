@@ -33,6 +33,7 @@ export interface ThemeSettings {
 export type FontFamily = "system-sans" | "serif" | "monospace";
 export type TextDirection = "auto" | "ltr" | "rtl";
 export type EditorWidth = "narrow" | "normal" | "wide" | "full" | "custom";
+export type ResourceStorageLocation = "assets" | "note-folder";
 
 export interface EditorFontSettings {
   baseFontFamily?: FontFamily;
@@ -69,6 +70,8 @@ export interface Settings {
   sidebarWidthPx?: number;
   defaultNoteName?: string;
   interfaceZoom?: number;
+  sidebarWidth?: number;
+  resourceStorageLocation?: ResourceStorageLocation;
   ollamaModel?: string;
   /** Model chosen per AI harness, keyed by provider id. */
   aiModels?: Record<string, string>;
@@ -76,6 +79,15 @@ export interface Settings {
   smartFolders?: SmartFolder[];
   customColorsLight?: CustomColors;
   customColorsDark?: CustomColors;
+  itemColors?: Record<string, ItemColorConfig>;
+}
+
+export interface ItemColorConfig {
+  color?: string;
+  applyToChildren: boolean;
+  bold?: boolean;
+  icon?: string;
+  description?: string;
 }
 
 export interface FolderNode {

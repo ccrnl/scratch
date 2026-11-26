@@ -1,49 +1,49 @@
-import { useEffect, type RefObject } from "react";
-import { Input, IconButton } from "../ui";
-import {
-  ArrowUpIcon,
-  ArrowDownIcon,
-  XIcon,
-  ChevronDownIcon,
-  ChevronRightIcon,
-  ReplaceIcon,
-  ReplaceAllIcon,
-} from "../icons";
+import { useEffect, type KeyboardEvent, type RefObject } from "react";
+import { Input, IconButton, Button } from "../ui";
+import { ArrowUpIcon, ArrowDownIcon, XIcon } from "../icons";
 import { shift } from "../../lib/platform";
+import { cn } from "../../lib/utils";
+
+export interface SearchOptions {
+  matchCase: boolean;
+  wholeWord: boolean;
+  useRegex: boolean;
+}
 
 interface SearchToolbarProps {
   query: string;
+  replaceQuery: string;
   onChange: (query: string) => void;
+  onReplaceChange: (query: string) => void;
   onNext: () => void;
   onPrevious: () => void;
-  onClose: () => void;
-  currentMatch: number;
-  totalMatches: number;
-  inputRef: RefObject<HTMLInputElement | null>;
-  // Replace functionality props
-  replaceQuery: string;
-  onReplaceChange: (value: string) => void;
   onReplace: () => void;
   onReplaceAll: () => void;
-  isReplaceOpen: boolean;
-  onToggleReplace: () => void;
+  onClose: () => void;
+  options: SearchOptions;
+  onOptionsChange: (options: SearchOptions) => void;
+  currentMatch: number;
+  totalMatches: number;
+  error: string | null;
+  inputRef: RefObject<HTMLInputElement | null>;
 }
 
 export function SearchToolbar({
   query,
+  replaceQuery,
   onChange,
+  onReplaceChange,
   onNext,
   onPrevious,
-  onClose,
-  currentMatch,
-  totalMatches,
-  inputRef,
-  replaceQuery,
-  onReplaceChange,
   onReplace,
   onReplaceAll,
-  isReplaceOpen,
-  onToggleReplace,
+  onClose,
+  options,
+  onOptionsChange,
+  currentMatch,
+  totalMatches,
+  error,
+  inputRef,
 }: SearchToolbarProps) {
   // Auto-focus input on mount
   useEffect(() => {
@@ -51,7 +51,16 @@ export function SearchToolbar({
     return () => cancelAnimationFrame(frame);
   }, [inputRef]);
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
+  const canReplace = totalMatches > 0 && !error;
+
+  const updateOption = (key: keyof SearchOptions) => {
+    onOptionsChange({
+      ...options,
+      [key]: !options[key],
+    });
+  };
+
+  const handleSearchKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") {
       e.preventDefault();
       e.stopPropagation();
@@ -70,15 +79,11 @@ export function SearchToolbar({
     }
   };
 
-  const handleReplaceKeyDown = (e: React.KeyboardEvent) => {
+  const handleReplaceKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") {
       e.preventDefault();
       e.stopPropagation();
-      if (e.metaKey || e.ctrlKey) {
-        onReplaceAll();
-      } else {
-        onReplace();
-      }
+      onReplace();
     } else if (e.key === "Escape") {
       e.preventDefault();
       e.stopPropagation();
@@ -89,89 +94,137 @@ export function SearchToolbar({
   };
 
   return (
-    <div className="flex flex-col gap-1.5 bg-bg border border-border rounded-lg shadow-lg p-1.5 w-85 text-text search-toolbar-container">
-      {/* First Row: Find */}
+    <div className="w-[34rem] max-w-[calc(100vw-1rem)] bg-bg border border-border rounded-lg shadow-lg p-1.5">
       <div className="flex items-center gap-1.5">
-        <IconButton
-          onClick={onToggleReplace}
-          title={isReplaceOpen ? "Hide Replace" : "Show Replace"}
-          className="shrink-0"
-        >
-          {isReplaceOpen ? (
-            <ChevronDownIcon className="w-4 h-4 stroke-[1.8]" />
-          ) : (
-            <ChevronRightIcon className="w-4 h-4 stroke-[1.8]" />
-          )}
-        </IconButton>
-
         <Input
           ref={inputRef}
           type="text"
           value={query}
           onChange={(e) => onChange(e.target.value)}
           placeholder="Find in note..."
-          className="flex-1 h-8 text-sm"
-          onKeyDown={handleKeyDown}
+          className="min-w-0 flex-1 h-8 text-sm"
+          onKeyDown={handleSearchKeyDown}
         />
 
-        <span className="text-xs text-text-muted whitespace-nowrap px-1 min-w-10 text-right">
-          {totalMatches > 0 ? `${currentMatch}/${totalMatches}` : "0/0"}
+        <span className="text-xs text-text-muted whitespace-nowrap px-1 min-w-18 text-center">
+          {error
+            ? "Invalid"
+            : totalMatches > 0
+              ? `${currentMatch}/${totalMatches}`
+              : "Not found"}
         </span>
 
-        <div className="flex items-center gap-px shrink-0">
-          <IconButton
-            onClick={onPrevious}
-            disabled={totalMatches === 0}
-            title={`Previous match (${shift}↵)`}
-          >
-            <ArrowUpIcon className="w-4.5 h-4.5 stroke-[1.5]" />
-          </IconButton>
+        <IconButton
+          onClick={onPrevious}
+          disabled={totalMatches === 0 || !!error}
+          title={`Previous match (${shift}↵)`}
+        >
+          <ArrowUpIcon className="w-4.5 h-4.5 stroke-[1.5]" />
+        </IconButton>
 
-          <IconButton
-            onClick={onNext}
-            disabled={totalMatches === 0}
-            title="Next match (↵)"
-          >
-            <ArrowDownIcon className="w-4.5 h-4.5 stroke-[1.5]" />
-          </IconButton>
+        <IconButton
+          onClick={onNext}
+          disabled={totalMatches === 0 || !!error}
+          title="Next match (↵)"
+        >
+          <ArrowDownIcon className="w-4.5 h-4.5 stroke-[1.5]" />
+        </IconButton>
 
-          <IconButton onClick={onClose} title="Close (Esc)">
-            <XIcon className="w-4.5 h-4.5 stroke-[1.5]" />
-          </IconButton>
+        <IconButton onClick={onClose} title="Close (Esc)">
+          <XIcon className="w-4.5 h-4.5 stroke-[1.5]" />
+        </IconButton>
+      </div>
+
+      <div className="mt-1.5 flex items-center gap-1.5">
+        <Input
+          type="text"
+          value={replaceQuery}
+          onChange={(e) => onReplaceChange(e.target.value)}
+          placeholder="Replace..."
+          className="min-w-0 flex-1 h-8 text-sm"
+          onKeyDown={handleReplaceKeyDown}
+        />
+
+        <Button
+          size="sm"
+          variant="default"
+          onClick={onReplace}
+          disabled={!canReplace}
+        >
+          Replace
+        </Button>
+        <Button
+          size="sm"
+          variant="default"
+          onClick={onReplaceAll}
+          disabled={!canReplace}
+        >
+          All
+        </Button>
+
+        <div className="flex items-center gap-px ml-1 border-l border-border pl-1">
+          <SearchOptionButton
+            active={options.matchCase}
+            title="Match case"
+            onClick={() => updateOption("matchCase")}
+          >
+            Aa
+          </SearchOptionButton>
+          <SearchOptionButton
+            active={options.wholeWord}
+            title="Whole word"
+            onClick={() => updateOption("wholeWord")}
+          >
+            W
+          </SearchOptionButton>
+          <SearchOptionButton
+            active={options.useRegex}
+            title="Use regular expression"
+            onClick={() => updateOption("useRegex")}
+          >
+            .*
+          </SearchOptionButton>
         </div>
       </div>
 
-      {/* Second Row: Replace */}
-      {isReplaceOpen && (
-        <div className="flex items-center gap-1.5 pl-8.5 animate-in slide-in-from-top-1 duration-150">
-          <Input
-            type="text"
-            value={replaceQuery}
-            onChange={(e) => onReplaceChange(e.target.value)}
-            placeholder="Replace with..."
-            className="flex-1 h-8 text-sm"
-            onKeyDown={handleReplaceKeyDown}
-          />
-
-          <div className="flex items-center gap-px shrink-0">
-            <IconButton
-              onClick={onReplace}
-              disabled={totalMatches === 0}
-              title="Replace (↵)"
-            >
-              <ReplaceIcon className="w-4.5 h-4.5 stroke-[1.5]" />
-            </IconButton>
-
-            <IconButton
-              onClick={onReplaceAll}
-              disabled={totalMatches === 0}
-              title="Replace All (Ctrl/Cmd+Enter)"
-            >
-              <ReplaceAllIcon className="w-4.5 h-4.5 stroke-[1.5]" />
-            </IconButton>
-          </div>
+      {error && (
+        <div className="px-2 pt-1 text-xs text-text-muted truncate">
+          {error}
         </div>
       )}
     </div>
+  );
+}
+
+interface SearchOptionButtonProps {
+  active: boolean;
+  title: string;
+  onClick: () => void;
+  children: string;
+}
+
+function SearchOptionButton({
+  active,
+  title,
+  onClick,
+  children,
+}: SearchOptionButtonProps) {
+  return (
+    <button
+      type="button"
+      aria-label={title}
+      aria-pressed={active}
+      title={title}
+      onClick={onClick}
+      className={cn(
+        "h-7 w-7 rounded-md text-xs font-medium transition-colors",
+        "focus:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1",
+        active
+          ? "bg-accent text-text-inverse"
+          : "text-text-muted hover:bg-bg-muted hover:text-text",
+      )}
+    >
+      {children}
+    </button>
   );
 }

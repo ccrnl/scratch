@@ -3,7 +3,10 @@ import {
   useLayoutEffect,
   useRef,
   useCallback,
+  useMemo,
   useState,
+  type CSSProperties,
+  type ReactNode,
 } from "react";
 import {
   useEditor,
@@ -35,7 +38,6 @@ import tippy, { type Instance as TippyInstance } from "tippy.js";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
-import { join } from "@tauri-apps/api/path";
 import { toast } from "sonner";
 import { mod, alt, shift, isMac, isWindows } from "../../lib/platform";
 
@@ -56,6 +58,94 @@ function isAllowedUrlScheme(url: string): boolean {
     return false;
   }
 }
+
+const URL_SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
+const WINDOWS_ABSOLUTE_PATH_RE = /^[a-zA-Z]:[\\/]/;
+
+function dirname(path: string): string {
+  const index = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  return index >= 0 ? path.slice(0, index) : "";
+}
+
+function normalizeFilePath(path: string, separator: "/" | "\\"): string {
+  const normalized = path.replace(/[\\/]+/g, separator);
+  const isWindows = separator === "\\";
+  const windowsPrefix = isWindows
+    ? normalized.match(/^[a-zA-Z]:\\/)?.[0]
+    : null;
+  const prefix =
+    windowsPrefix ?? (normalized.startsWith(separator) ? separator : "");
+  const rest = prefix ? normalized.slice(prefix.length) : normalized;
+  const segments: string[] = [];
+
+  for (const segment of rest.split(separator)) {
+    if (!segment || segment === ".") continue;
+    if (segment === "..") {
+      if (segments.length > 0) segments.pop();
+      continue;
+    }
+    segments.push(segment);
+  }
+
+  return `${prefix}${segments.join(separator)}`;
+}
+
+function isRemoteOrAssetSrc(src: string): boolean {
+  if (WINDOWS_ABSOLUTE_PATH_RE.test(src)) return false;
+  if (src.startsWith("file://")) return false;
+  return URL_SCHEME_RE.test(src) || src.startsWith("//") || src.startsWith("#");
+}
+
+function decodeImagePath(src: string): string {
+  try {
+    return decodeURI(src);
+  } catch {
+    return src;
+  }
+}
+
+function resolveLocalImagePath(
+  src: string,
+  notePath: string | null,
+): string | null {
+  const trimmed = src.trim();
+  if (!trimmed || isRemoteOrAssetSrc(trimmed)) return null;
+
+  const decoded = decodeImagePath(trimmed);
+  if (decoded.startsWith("file://")) {
+    try {
+      const path = decodeImagePath(new URL(decoded).pathname);
+      if (/^\/[a-zA-Z]:\//.test(path)) {
+        return normalizeFilePath(path.slice(1), "\\");
+      }
+      return normalizeFilePath(path, "/");
+    } catch {
+      return null;
+    }
+  }
+
+  if (WINDOWS_ABSOLUTE_PATH_RE.test(decoded)) {
+    return normalizeFilePath(decoded, "\\");
+  }
+
+  if (decoded.startsWith("/")) {
+    return normalizeFilePath(decoded, "/");
+  }
+
+  if (!notePath) return null;
+
+  const separator: "/" | "\\" = notePath.includes("\\") ? "\\" : "/";
+  return normalizeFilePath(
+    `${dirname(notePath)}${separator}${decoded}`,
+    separator,
+  );
+}
+
+function resolveImageDisplaySrc(src: unknown, notePath: string | null): string {
+  const rawSrc = typeof src === "string" ? src : "";
+  const localPath = resolveLocalImagePath(rawSrc, notePath);
+  return localPath ? convertFileSrc(localPath) : rawSrc;
+}
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { Menu, MenuItem, PredefinedMenuItem } from "@tauri-apps/api/menu";
 import { useOptionalNotes } from "../../context/NotesContext";
@@ -63,7 +153,7 @@ import { useTheme } from "../../context/ThemeContext";
 import { Frontmatter } from "./Frontmatter";
 import { BlockMathEditor } from "./BlockMathEditor";
 import { LinkEditor } from "./LinkEditor";
-import { SearchToolbar } from "./SearchToolbar";
+import { SearchToolbar, type SearchOptions } from "./SearchToolbar";
 import { SlashCommand } from "./SlashCommand";
 import { Wikilink, type WikilinkStorage } from "./Wikilink";
 import { WikilinkSuggestion } from "./WikilinkSuggestion";
@@ -71,6 +161,7 @@ import { EditorWidthHandles } from "./EditorWidthHandle";
 import { ScratchBlockMath, normalizeBlockMath } from "./MathExtensions";
 import { cn } from "../../lib/utils";
 import { plainTextFromMarkdown } from "../../lib/plainText";
+import { resolveItemColor } from "../../lib/itemColor";
 import { Button, IconButton, ToolbarButton, Tooltip } from "../ui";
 import * as notesService from "../../services/notes";
 import { downloadPdf, downloadMarkdown } from "../../services/pdf";
@@ -100,6 +191,7 @@ import {
   CopyIcon,
   DownloadIcon,
   ShareIcon,
+  LocateIcon,
   PanelLeftIcon,
   RefreshCwIcon,
   PinIcon,
@@ -161,9 +253,174 @@ const katexMacros: Record<string, string> = {
 const searchHighlightPluginKey = new PluginKey("searchHighlight");
 
 interface SearchHighlightOptions {
-  matches: Array<{ from: number; to: number }>;
+  matches: SearchMatch[];
   currentIndex: number;
 }
+
+interface SearchMatch {
+  from: number;
+  to: number;
+  text: string;
+  captures: string[];
+  groups?: Record<string, string | undefined>;
+  prefix: string;
+  suffix: string;
+}
+
+interface SearchResult {
+  matches: SearchMatch[];
+  error: string | null;
+}
+
+const MAX_SEARCH_MATCHES = 500;
+const WORD_CHAR_RE = /[\p{L}\p{N}_]/u;
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function isWordChar(char: string | undefined): boolean {
+  return !!char && WORD_CHAR_RE.test(char);
+}
+
+function isWholeWordMatch(text: string, index: number, length: number): boolean {
+  const before = index > 0 ? text[index - 1] : undefined;
+  const after = index + length < text.length ? text[index + length] : undefined;
+  return !isWordChar(before) && !isWordChar(after);
+}
+
+function advanceRegexIndex(text: string, index: number): number {
+  if (index >= text.length) return index + 1;
+  const codePoint = text.codePointAt(index);
+  return index + (codePoint && codePoint > 0xffff ? 2 : 1);
+}
+
+function createSearchRegExp(
+  query: string,
+  options: SearchOptions,
+): { regex: RegExp | null; error: string | null } {
+  if (query.length === 0) {
+    return { regex: null, error: null };
+  }
+
+  const source = options.useRegex ? query : escapeRegExp(query);
+  const flags = `g${options.matchCase ? "" : "i"}u`;
+
+  try {
+    return { regex: new RegExp(source, flags), error: null };
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Invalid regular expression";
+    return { regex: null, error: message };
+  }
+}
+
+function expandRegexReplacement(
+  replacement: string,
+  match: SearchMatch,
+): string {
+  return replacement.replace(
+    /\$(\$|&|`|'|<[^>]+>|\d{1,2})/g,
+    (token, marker: string) => {
+      if (marker === "$") return "$";
+      if (marker === "&" || marker === "0") return match.text;
+      if (marker === "`") return match.prefix;
+      if (marker === "'") return match.suffix;
+
+      if (marker.startsWith("<") && marker.endsWith(">")) {
+        const name = marker.slice(1, -1);
+        return match.groups && name in match.groups
+          ? (match.groups[name] ?? "")
+          : token;
+      }
+
+      const captureIndex = Number(marker);
+      if (
+        Number.isInteger(captureIndex) &&
+        captureIndex > 0 &&
+        captureIndex <= match.captures.length
+      ) {
+        return match.captures[captureIndex - 1] ?? "";
+      }
+
+      return token;
+    },
+  );
+}
+
+function getReplacementText(
+  match: SearchMatch,
+  replacement: string,
+  options: SearchOptions,
+): string {
+  if (!options.useRegex) return replacement;
+  return expandRegexReplacement(replacement, match);
+}
+
+// Plain-text variant of match finding, used by source (markdown) mode
+function findMatchesInText(
+  text: string,
+  query: string,
+  options: SearchOptions,
+): SearchResult {
+  if (query.length === 0) {
+    return { matches: [], error: null };
+  }
+
+  const { regex, error } = createSearchRegExp(query, options);
+  if (error || !regex) {
+    return { matches: [], error };
+  }
+
+  const matches: SearchMatch[] = [];
+  regex.lastIndex = 0;
+
+  let result: RegExpExecArray | null;
+  while (matches.length < MAX_SEARCH_MATCHES && (result = regex.exec(text))) {
+    const matchText = result[0];
+    if (matchText.length === 0) {
+      regex.lastIndex = advanceRegexIndex(text, regex.lastIndex);
+      continue;
+    }
+
+    const index = result.index;
+    if (options.wholeWord && !isWholeWordMatch(text, index, matchText.length)) {
+      continue;
+    }
+
+    // Bound prefix/suffix to the match's line (mirrors per-node behavior)
+    const lineStart = text.lastIndexOf("\n", Math.max(0, index - 1)) + 1;
+    const lineEndIndex = text.indexOf("\n", index + matchText.length);
+    const lineEnd = lineEndIndex === -1 ? text.length : lineEndIndex;
+
+    matches.push({
+      from: index,
+      to: index + matchText.length,
+      text: matchText,
+      captures: result.slice(1).map((value) => value ?? ""),
+      groups: result.groups ? { ...result.groups } : undefined,
+      prefix: text.slice(lineStart, index),
+      suffix: text.slice(index + matchText.length, lineEnd),
+    });
+  }
+
+  return { matches, error: null };
+}
+
+function sourceSearchKey(query: string, options: SearchOptions): string {
+  return `${options.matchCase ? 1 : 0}${options.wholeWord ? 1 : 0}${options.useRegex ? 1 : 0}:${query}`;
+}
+
+// Shared text metrics for the source textarea and its highlight mirror —
+// both must render text identically for highlight alignment.
+const SOURCE_EDITOR_STYLE: CSSProperties = {
+  maxWidth: "var(--editor-max-width, 48rem)",
+  fontFamily:
+    "ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Monaco, 'Courier New', monospace",
+  fontSize: "0.875em",
+  lineHeight: "var(--editor-line-height)",
+  tabSize: 2,
+};
 
 const SearchHighlight = Extension.create<SearchHighlightOptions>({
   name: "searchHighlight",
@@ -444,6 +701,7 @@ interface EditorProps {
   onToggleSidebar?: () => void;
   onToggleAiSidebar?: () => void;
   aiSidebarOpen?: boolean;
+  onRevealInSidebar?: () => void;
   sidebarVisible?: boolean;
   focusMode?: boolean;
   previewMode?: PreviewModeData;
@@ -509,6 +767,7 @@ export function Editor({
   onToggleSidebar,
   onToggleAiSidebar,
   aiSidebarOpen,
+  onRevealInSidebar,
   sidebarVisible,
   focusMode,
   onEditorReady,
@@ -557,6 +816,13 @@ export function Editor({
   const [, setSelectionKey] = useState(0);
   const [copyMenuOpen, setCopyMenuOpen] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
+  const noteColor = useMemo(
+    () =>
+      currentNote && settings?.itemColors
+        ? resolveItemColor(settings.itemColors, currentNote.id)
+        : null,
+    [currentNote, settings?.itemColors],
+  );
   // Delay transition classes until after initial mount to avoid format bar height animation on note load
   const [hasTransitioned, setHasTransitioned] = useState(false);
   useEffect(() => {
@@ -573,6 +839,11 @@ export function Editor({
   const [sourceMode, setSourceMode] = useState(false);
   const [sourceContent, setSourceContent] = useState("");
   const sourceTimeoutRef = useRef<number | null>(null);
+  const sourceTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const sourceMirrorRef = useRef<HTMLDivElement | null>(null);
+  // Incremented to request scrolling the active source match into view after render
+  const [sourceScrollTick, setSourceScrollTick] = useState(0);
+  const lastSourceSearchKeyRef = useRef<string | null>(null);
   const sourceModeTransitionRef = useRef<{
     topBlockIndex: number;
     cursorBlockIndex: number;
@@ -582,11 +853,14 @@ export function Editor({
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [replaceQuery, setReplaceQuery] = useState("");
-  const [isReplaceOpen, setIsReplaceOpen] = useState(false);
-  const [searchMatches, setSearchMatches] = useState<
-    Array<{ from: number; to: number }>
-  >([]);
+  const [searchOptions, setSearchOptions] = useState<SearchOptions>({
+    matchCase: false,
+    wholeWord: false,
+    useRegex: false,
+  });
+  const [searchMatches, setSearchMatches] = useState<SearchMatch[]>([]);
   const [currentMatchIndex, setCurrentMatchIndex] = useState(0);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const saveTimeoutRef = useRef<number | null>(null);
   const linkPopupRef = useRef<TippyInstance | null>(null);
@@ -595,6 +869,7 @@ export function Editor({
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<TiptapEditor | null>(null);
   const currentNoteIdRef = useRef<string | null>(null);
+  const currentNotePathRef = useRef<string | null>(null);
   // Track if we need to save (use ref to avoid computing markdown on every keystroke)
   const needsSaveRef = useRef(false);
   // Stable refs for wikilink click handler (avoids re-registering listener on every notes change)
@@ -605,6 +880,7 @@ export function Editor({
 
   // Keep ref in sync with current note ID
   currentNoteIdRef.current = currentNote?.id ?? null;
+  currentNotePathRef.current = currentNote?.path ?? null;
 
   // Get markdown from editor
   const getMarkdown = useCallback(
@@ -639,43 +915,72 @@ export function Editor({
   const isPinned =
     settings?.pinnedNoteIds?.includes(currentNote?.id || "") || false;
 
-  // Find all matches for search query (case-insensitive)
+  // Find all matches for search query
   const findMatches = useCallback(
-    (query: string, editorInstance: TiptapEditor | null) => {
-      if (!editorInstance || !query.trim()) return [];
+    (
+      query: string,
+      options: SearchOptions,
+      editorInstance: TiptapEditor | null,
+    ): SearchResult => {
+      if (!editorInstance || query.length === 0) {
+        return { matches: [], error: null };
+      }
+
+      const { regex, error } = createSearchRegExp(query, options);
+      if (error || !regex) {
+        return { matches: [], error };
+      }
 
       const doc = editorInstance.state.doc;
-      const lowerQuery = query.toLowerCase();
-      const matches: Array<{ from: number; to: number }> = [];
+      const matches: SearchMatch[] = [];
 
       // Search through each text node
       doc.descendants((node, nodePos) => {
         if (node.isText && node.text) {
           const text = node.text;
-          const lowerText = text.toLowerCase();
+          regex.lastIndex = 0;
 
-          let searchPos = 0;
-          while (searchPos < lowerText.length && matches.length < 500) {
-            const index = lowerText.indexOf(lowerQuery, searchPos);
-            if (index === -1) break;
+          let result: RegExpExecArray | null;
+          while (
+            matches.length < MAX_SEARCH_MATCHES &&
+            (result = regex.exec(text))
+          ) {
+            const matchText = result[0];
+            if (matchText.length === 0) {
+              regex.lastIndex = advanceRegexIndex(text, regex.lastIndex);
+              continue;
+            }
+
+            const index = result.index;
+            if (
+              options.wholeWord &&
+              !isWholeWordMatch(text, index, matchText.length)
+            ) {
+              continue;
+            }
 
             const matchFrom = nodePos + index;
-            const matchTo = matchFrom + query.length;
+            const matchTo = matchFrom + matchText.length;
 
             // Make sure the match doesn't extend beyond valid document bounds
             if (matchTo <= doc.content.size) {
               matches.push({
                 from: matchFrom,
                 to: matchTo,
+                text: matchText,
+                captures: result.slice(1).map((value) => value ?? ""),
+                groups: result.groups ? { ...result.groups } : undefined,
+                prefix: text.slice(0, index),
+                suffix: text.slice(index + matchText.length),
               });
             }
-
-            searchPos = index + 1;
           }
         }
+
+        return matches.length < MAX_SEARCH_MATCHES;
       });
 
-      return matches;
+      return { matches, error: null };
     },
     [],
   );
@@ -683,7 +988,7 @@ export function Editor({
   // Update search decorations - applies yellow backgrounds to all matches
   const updateSearchDecorations = useCallback(
     (
-      matches: Array<{ from: number; to: number }>,
+      matches: SearchMatch[],
       currentIndex: number,
       editorInstance: TiptapEditor | null,
     ) => {
@@ -1099,7 +1404,20 @@ export function Editor({
           ];
         },
       }),
-      Image.configure({
+      Image.extend({
+        renderHTML({ HTMLAttributes }) {
+          return [
+            "img",
+            {
+              ...HTMLAttributes,
+              src: resolveImageDisplaySrc(
+                HTMLAttributes.src,
+                currentNotePathRef.current,
+              ),
+            },
+          ];
+        },
+      }).configure({
         inline: false,
         allowBase64: false,
       }),
@@ -1193,21 +1511,17 @@ export function Editor({
                 // Save clipboard image
                 const relativePath = await invoke<string>(
                   "save_clipboard_image",
-                  { base64Data: base64 },
+                  {
+                    base64Data: base64,
+                    targetNotePath: currentNotePathRef.current,
+                  },
                 );
-
-                // Get notes folder and construct absolute path using Tauri's join
-                const notesFolder = await invoke<string>("get_notes_folder");
-                const absolutePath = await join(notesFolder, relativePath);
-
-                // Convert to Tauri asset URL
-                const assetUrl = convertFileSrc(absolutePath);
 
                 // Insert image
                 editorRef.current
                   ?.chain()
                   .focus()
-                  .setImage({ src: assetUrl })
+                  .setImage({ src: relativePath })
                   .run();
               } catch (error) {
                 console.error("Failed to paste image:", error);
@@ -1296,97 +1610,314 @@ export function Editor({
 
   // Search navigation functions (defined after editor is created)
   const goToNextMatch = useCallback(() => {
-    if (searchMatches.length === 0 || !editor) return;
+    if (searchMatches.length === 0) return;
     const nextIndex = (currentMatchIndex + 1) % searchMatches.length;
     setCurrentMatchIndex(nextIndex);
-    updateSearchDecorations(searchMatches, nextIndex, editor);
-  }, [searchMatches, currentMatchIndex, editor, updateSearchDecorations]);
+    if (sourceMode) {
+      setSourceScrollTick((tick) => tick + 1);
+    } else if (editor) {
+      updateSearchDecorations(searchMatches, nextIndex, editor);
+    }
+  }, [
+    searchMatches,
+    currentMatchIndex,
+    editor,
+    sourceMode,
+    updateSearchDecorations,
+  ]);
 
   const goToPreviousMatch = useCallback(() => {
-    if (searchMatches.length === 0 || !editor) return;
+    if (searchMatches.length === 0) return;
     const prevIndex =
       (currentMatchIndex - 1 + searchMatches.length) % searchMatches.length;
     setCurrentMatchIndex(prevIndex);
-    updateSearchDecorations(searchMatches, prevIndex, editor);
-  }, [searchMatches, currentMatchIndex, editor, updateSearchDecorations]);
+    if (sourceMode) {
+      setSourceScrollTick((tick) => tick + 1);
+    } else if (editor) {
+      updateSearchDecorations(searchMatches, prevIndex, editor);
+    }
+  }, [
+    searchMatches,
+    currentMatchIndex,
+    editor,
+    sourceMode,
+    updateSearchDecorations,
+  ]);
+
+  const refreshSearchMatches = useCallback(
+    (preferredFrom = 0) => {
+      if (!editor || sourceMode) return;
+
+      if (searchQuery.length === 0) {
+        setSearchMatches([]);
+        setSearchError(null);
+        setCurrentMatchIndex(0);
+        updateSearchDecorations([], 0, editor);
+        return;
+      }
+
+      const result = findMatches(searchQuery, searchOptions, editor);
+      const nextIndex = result.matches.findIndex(
+        (match) => match.from >= preferredFrom,
+      );
+      const resolvedIndex =
+        result.matches.length === 0 ? 0 : nextIndex === -1 ? 0 : nextIndex;
+
+      setSearchMatches(result.matches);
+      setSearchError(result.error);
+      setCurrentMatchIndex(resolvedIndex);
+      updateSearchDecorations(result.matches, resolvedIndex, editor);
+    },
+    [
+      editor,
+      findMatches,
+      searchOptions,
+      searchQuery,
+      sourceMode,
+      updateSearchDecorations,
+    ],
+  );
 
   // Handle search query change
   const handleSearchChange = useCallback((query: string) => {
     setSearchQuery(query);
   }, []);
 
-  const replaceCurrent = useCallback((replaceText: string) => {
-    if (!editor || !searchQuery.trim()) return;
+  // Auto-save in source mode with debounce
+  const handleSourceChange = useCallback(
+    (value: string) => {
+      setSourceContent(value);
+      if (sourceTimeoutRef.current) {
+        clearTimeout(sourceTimeoutRef.current);
+      }
+      sourceTimeoutRef.current = window.setTimeout(async () => {
+        if (currentNote) {
+          setIsSaving(true);
+          try {
+            lastSaveRef.current = { noteId: currentNote.id, content: value };
+            await saveNote(value, currentNote.id);
+          } catch (error) {
+            console.error("Failed to save note:", error);
+            toast.error("Failed to save note");
+          } finally {
+            setIsSaving(false);
+          }
+        }
+      }, 300);
+    },
+    [currentNote, saveNote],
+  );
 
-    // Recompute from current doc state to avoid stale debounced matches.
-    const currentMatches = findMatches(searchQuery, editor);
-    if (currentMatches.length === 0) return;
+  const replaceSearchMatches = useCallback(
+    (matches: SearchMatch[], preferredFrom = 0) => {
+      if (matches.length === 0 || searchError) return;
 
-    const safeIndex = Math.min(currentMatchIndex, currentMatches.length - 1);
-    const match = currentMatches[safeIndex];
-    if (!match) return;
+      if (sourceMode) {
+        let next = sourceContent;
+        [...matches]
+          .sort((a, b) => b.from - a.from)
+          .forEach((match) => {
+            next =
+              next.slice(0, match.from) +
+              getReplacementText(match, replaceQuery, searchOptions) +
+              next.slice(match.to);
+          });
 
-    editor.view.dispatch(
-      editor.state.tr.insertText(replaceText, match.from, match.to)
-    );
+        if (next === sourceContent) return;
 
-    const newMatches = findMatches(searchQuery, editor);
-    setSearchMatches(newMatches);
+        handleSourceChange(next);
+        // Recompute immediately so match offsets stay valid for chained replaces
+        const result = findMatchesInText(next, searchQuery, searchOptions);
+        const nextIndex = result.matches.findIndex(
+          (match) => match.from >= preferredFrom,
+        );
+        setSearchMatches(result.matches);
+        setSearchError(result.error);
+        setCurrentMatchIndex(
+          result.matches.length === 0 ? 0 : nextIndex === -1 ? 0 : nextIndex,
+        );
+        setSourceScrollTick((tick) => tick + 1);
+        return;
+      }
 
-    if (newMatches.length > 0) {
-      // Move to the first match after the replaced range.
-      const nextPos = match.from + replaceText.length;
-      const nextIndex = newMatches.findIndex((m) => m.from >= nextPos);
-      const resolvedIndex = nextIndex === -1 ? 0 : nextIndex;
-      setCurrentMatchIndex(resolvedIndex);
-      updateSearchDecorations(newMatches, resolvedIndex, editor);
-    } else {
-      setCurrentMatchIndex(0);
-      updateSearchDecorations([], 0, editor);
-    }
-  }, [editor, searchQuery, currentMatchIndex, findMatches, updateSearchDecorations]);
+      if (!editor) return;
 
-  const replaceAll = useCallback((replaceText: string) => {
-    if (!editor || !searchQuery) return;
-    const currentMatches = findMatches(searchQuery, editor);
-    if (currentMatches.length === 0) return;
+      const tr = editor.state.tr;
+      [...matches]
+        .sort((a, b) => b.from - a.from)
+        .forEach((match) => {
+          tr.insertText(
+            getReplacementText(match, replaceQuery, searchOptions),
+            match.from,
+            match.to,
+          );
+        });
 
-    const tr = editor.state.tr;
-    for (let i = currentMatches.length - 1; i >= 0; i--) {
-      const match = currentMatches[i];
-      tr.insertText(replaceText, match.from, match.to);
-    }
-    editor.view.dispatch(tr);
+      if (!tr.docChanged) return;
 
-    const newMatches = findMatches(searchQuery, editor);
-    setSearchMatches(newMatches);
+      // Don't focus the editor here: it would steal focus from the search
+      // toolbar and break repeated Enter-to-replace on subsequent matches
+      editor.view.dispatch(tr.scrollIntoView());
+      requestAnimationFrame(() => refreshSearchMatches(preferredFrom));
+    },
+    [
+      editor,
+      handleSourceChange,
+      refreshSearchMatches,
+      replaceQuery,
+      searchError,
+      searchOptions,
+      searchQuery,
+      sourceContent,
+      sourceMode,
+    ],
+  );
+
+  const replaceCurrentMatch = useCallback(() => {
+    if (searchMatches.length === 0 || searchError) return;
+
+    const match = searchMatches[currentMatchIndex] ?? searchMatches[0];
+    const replacement = getReplacementText(match, replaceQuery, searchOptions);
+    replaceSearchMatches([match], match.from + replacement.length);
+  }, [
+    currentMatchIndex,
+    replaceQuery,
+    replaceSearchMatches,
+    searchError,
+    searchMatches,
+    searchOptions,
+  ]);
+
+  const replaceAllMatches = useCallback(() => {
+    if (searchMatches.length === 0 || searchError) return;
+    replaceSearchMatches(searchMatches, 0);
+  }, [replaceSearchMatches, searchError, searchMatches]);
+
+  // Close search and restore focus to the active editing surface
+  const closeSearch = useCallback(() => {
+    setSearchOpen(false);
+    setSearchQuery("");
+    setReplaceQuery("");
+    setSearchMatches([]);
+    setSearchError(null);
     setCurrentMatchIndex(0);
-    updateSearchDecorations(newMatches, 0, editor);
-  }, [editor, searchQuery, findMatches, updateSearchDecorations]);
+    lastSourceSearchKeyRef.current = null;
+    if (sourceMode) {
+      sourceTextareaRef.current?.focus();
+    } else if (editor) {
+      // Clear decorations and refocus editor
+      updateSearchDecorations([], 0, editor);
+      editor.commands.focus();
+    }
+  }, [editor, sourceMode, updateSearchDecorations]);
 
   // Debounced search effect
   useEffect(() => {
-    if (!searchQuery.trim()) {
-      setSearchMatches([]);
-      setCurrentMatchIndex(0);
-      // Clear decorations when search is empty
-      if (editor) {
-        updateSearchDecorations([], 0, editor);
-      }
+    if (searchQuery.length === 0) {
+      refreshSearchMatches(0);
       return;
     }
 
     const timer = setTimeout(() => {
-      if (!editor) return;
-      const matches = findMatches(searchQuery, editor);
-      setSearchMatches(matches);
-      setCurrentMatchIndex(0);
-      // Always update decorations (clears old highlights when no matches)
-      updateSearchDecorations(matches, 0, editor);
+      refreshSearchMatches(0);
     }, 150);
 
     return () => clearTimeout(timer);
-  }, [searchQuery, editor, findMatches, updateSearchDecorations]);
+  }, [refreshSearchMatches, searchQuery]);
+
+  // Debounced search effect for source mode — recomputes on query, options,
+  // and content changes (offsets must stay in sync with the textarea text)
+  useEffect(() => {
+    if (!sourceMode || !searchOpen) return;
+
+    if (searchQuery.length === 0) {
+      lastSourceSearchKeyRef.current = null;
+      setSearchMatches([]);
+      setSearchError(null);
+      setCurrentMatchIndex(0);
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      const key = sourceSearchKey(searchQuery, searchOptions);
+      const queryChanged = lastSourceSearchKeyRef.current !== key;
+      lastSourceSearchKeyRef.current = key;
+
+      const result = findMatchesInText(sourceContent, searchQuery, searchOptions);
+      setSearchMatches(result.matches);
+      setSearchError(result.error);
+      setCurrentMatchIndex((prev) =>
+        result.matches.length === 0
+          ? 0
+          : Math.min(prev, result.matches.length - 1),
+      );
+      // Scroll to the active match only when the search itself changed,
+      // not when the user is typing in the textarea
+      if (queryChanged && result.matches.length > 0) {
+        setSourceScrollTick((tick) => tick + 1);
+      }
+    }, 150);
+
+    return () => clearTimeout(timer);
+  }, [sourceMode, searchOpen, searchQuery, searchOptions, sourceContent]);
+
+  // Keep the source highlight mirror scroll-synced with the textarea
+  const syncSourceScroll = useCallback(() => {
+    const textarea = sourceTextareaRef.current;
+    const mirror = sourceMirrorRef.current;
+    if (!textarea || !mirror) return;
+    mirror.scrollTop = textarea.scrollTop;
+    mirror.scrollLeft = textarea.scrollLeft;
+  }, []);
+
+  // Scroll the active source match into view (runs after marks render)
+  useEffect(() => {
+    if (!sourceMode || sourceScrollTick === 0) return;
+    const textarea = sourceTextareaRef.current;
+    const mark = sourceMirrorRef.current?.querySelector<HTMLElement>(
+      ".search-match-active",
+    );
+    if (!textarea || !mark) return;
+    textarea.scrollTop = Math.max(
+      0,
+      mark.offsetTop - textarea.clientHeight / 2,
+    );
+    textarea.scrollLeft = Math.max(
+      0,
+      mark.offsetLeft - textarea.clientWidth / 2,
+    );
+    syncSourceScroll();
+  }, [sourceScrollTick, sourceMode, syncSourceScroll]);
+
+  // Re-sync mirror scroll whenever its content re-renders (e.g. mount, match updates)
+  useEffect(() => {
+    if (sourceMode && searchOpen) syncSourceScroll();
+  }, [sourceMode, searchOpen, searchMatches, currentMatchIndex, syncSourceScroll]);
+
+  // Highlighted segments rendered in the mirror behind the source textarea
+  const sourceHighlightSegments = useMemo<ReactNode[] | null>(() => {
+    if (!sourceMode || !searchOpen || searchMatches.length === 0) return null;
+    const segments: ReactNode[] = [];
+    let last = 0;
+    searchMatches.forEach((match, index) => {
+      if (match.from > last) {
+        segments.push(sourceContent.slice(last, match.from));
+      }
+      segments.push(
+        <span
+          key={index}
+          className={
+            index === currentMatchIndex ? "search-match-active" : "search-match"
+          }
+        >
+          {sourceContent.slice(match.from, match.to)}
+        </span>,
+      );
+      last = match.to;
+    });
+    segments.push(sourceContent.slice(last));
+    return segments;
+  }, [sourceMode, searchOpen, searchMatches, currentMatchIndex, sourceContent]);
 
   // Handle clicks on wikilinks and external links
   useEffect(() => {
@@ -1751,20 +2282,12 @@ export function Editor({
     });
     if (selected) {
       try {
-        // Copy image to assets folder and get relative path (assets/filename.ext)
-        const relativePath = await invoke<string>("copy_image_to_assets", {
+        const relativePath = await invoke<string>("copy_image_to_resources", {
           sourcePath: selected as string,
+          targetNotePath: currentNotePathRef.current,
         });
 
-        // Get notes folder and construct absolute path using Tauri's join
-        const notesFolder = await invoke<string>("get_notes_folder");
-        const absolutePath = await join(notesFolder, relativePath);
-
-        // Convert to Tauri asset URL
-        const assetUrl = convertFileSrc(absolutePath);
-
-        // Insert image with asset URL
-        editor.chain().focus().setImage({ src: assetUrl }).run();
+        editor.chain().focus().setImage({ src: relativePath }).run();
       } catch (error) {
         console.error("Failed to add image:", error);
       }
@@ -1844,11 +2367,12 @@ export function Editor({
         const target = e.target as HTMLElement;
         const tagName = target.tagName.toLowerCase();
 
-        // Don't intercept if user is in an input/textarea (except the editor itself or search toolbar)
+        // Don't intercept if user is in an input/textarea
+        // (except the editor itself or the markdown source textarea)
         if (
           (tagName === "input" || tagName === "textarea") &&
           !target.closest(".ProseMirror") &&
-          !target.closest(".search-toolbar-container")
+          target !== sourceTextareaRef.current
         ) {
           return;
         }
@@ -1860,9 +2384,6 @@ export function Editor({
 
         // Open search for the editor
         e.preventDefault();
-        if (openReplace) {
-          setIsReplaceOpen(true);
-        }
         openEditorSearch();
       }
     };
@@ -1876,8 +2397,8 @@ export function Editor({
       setSearchOpen(false);
       setSearchQuery("");
       setReplaceQuery("");
-      setIsReplaceOpen(false);
       setSearchMatches([]);
+      setSearchError(null);
       setCurrentMatchIndex(0);
       // Clear decorations
       if (editor) {
@@ -2122,30 +2643,14 @@ export function Editor({
     return () => window.removeEventListener("toggle-source-mode", handler);
   }, [toggleSourceMode]);
 
-  // Auto-save in source mode with debounce
-  const handleSourceChange = useCallback(
-    (value: string) => {
-      setSourceContent(value);
-      if (sourceTimeoutRef.current) {
-        clearTimeout(sourceTimeoutRef.current);
-      }
-      sourceTimeoutRef.current = window.setTimeout(async () => {
-        if (currentNote) {
-          setIsSaving(true);
-          try {
-            lastSaveRef.current = { noteId: currentNote.id, content: value };
-            await saveNote(value, currentNote.id);
-          } catch (error) {
-            console.error("Failed to save note:", error);
-            toast.error("Failed to save note");
-          } finally {
-            setIsSaving(false);
-          }
-        }
-      }, 300);
-    },
-    [currentNote, saveNote],
-  );
+  // Reset search matches when switching modes mid-search — offsets are not
+  // comparable between ProseMirror positions and source text, so force a
+  // fresh computation (and scroll) in the new mode
+  useEffect(() => {
+    lastSourceSearchKeyRef.current = null;
+    setSearchMatches([]);
+    setCurrentMatchIndex(0);
+  }, [sourceMode]);
 
   if (!currentNote) {
     // Preview mode: show loading state (content not yet loaded)
@@ -2236,6 +2741,26 @@ export function Editor({
     );
   }
 
+  const searchToolbar = searchOpen ? (
+    <SearchToolbar
+      inputRef={searchInputRef}
+      query={searchQuery}
+      replaceQuery={replaceQuery}
+      onChange={handleSearchChange}
+      onReplaceChange={setReplaceQuery}
+      onNext={goToNextMatch}
+      onPrevious={goToPreviousMatch}
+      onReplace={replaceCurrentMatch}
+      onReplaceAll={replaceAllMatches}
+      options={searchOptions}
+      onOptionsChange={setSearchOptions}
+      onClose={closeSearch}
+      currentMatch={searchMatches.length === 0 ? 0 : currentMatchIndex + 1}
+      totalMatches={searchMatches.length}
+      error={searchError}
+    />
+  ) : null;
+
   return (
     <div className="flex-1 flex flex-col bg-bg overflow-hidden">
       {/* Drag region with sidebar toggle, date and save status */}
@@ -2292,6 +2817,13 @@ export function Editor({
               <div className="h-7 w-7 flex items-center justify-center rounded-full">
                 <CircleCheckIcon className="w-4.5 h-4.5 mt-px stroke-[1.5] text-text-muted/40" />
               </div>
+            </Tooltip>
+          )}
+          {currentNote && onRevealInSidebar && (
+            <Tooltip content="Show in sidebar">
+              <IconButton onClick={onRevealInSidebar}>
+                <LocateIcon className="w-5 h-5 stroke-[1.3]" />
+              </IconButton>
             </Tooltip>
           )}
           {currentNote && pinNote && unpinNote && (
@@ -2475,65 +3007,54 @@ export function Editor({
           dir={textDirection}
         >
           {sourceMode ? (
-            /* Markdown source textarea */
-            <div className="h-full">
+            /* Markdown source textarea with search highlight mirror */
+            <div className="h-full relative">
+              {sourceHighlightSegments && (
+                <div
+                  aria-hidden
+                  className="absolute inset-0 pointer-events-none"
+                  dir={textDirection}
+                >
+                  <div
+                    ref={sourceMirrorRef}
+                    className="relative w-full h-full text-transparent px-6 pt-8 pb-24 mx-auto block overflow-hidden"
+                    style={{ ...SOURCE_EDITOR_STYLE, whiteSpace: "pre" }}
+                  >
+                    {sourceHighlightSegments}
+                  </div>
+                </div>
+              )}
               <textarea
+                ref={sourceTextareaRef}
                 value={sourceContent}
                 onChange={(e) => handleSourceChange(e.target.value)}
+                onScroll={syncSourceScroll}
                 wrap="off"
                 dir={textDirection}
-                className="w-full h-full bg-transparent text-text focus:outline-none resize-none px-6 pt-8 pb-24 mx-auto block"
-                style={{
-                  maxWidth: "var(--editor-max-width, 48rem)",
-                  fontFamily:
-                    "ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Monaco, 'Courier New', monospace",
-                  fontSize: "0.875em",
-                  lineHeight: "var(--editor-line-height)",
-                  tabSize: 2,
-                }}
+                className="relative w-full h-full bg-transparent text-text focus:outline-none resize-none px-6 pt-8 pb-24 mx-auto block"
+                style={SOURCE_EDITOR_STYLE}
                 spellCheck={false}
               />
+              {searchOpen && (
+                <div className="absolute top-2 right-2 z-10 animate-in fade-in slide-in-from-top-4 duration-200">
+                  {searchToolbar}
+                </div>
+              )}
             </div>
           ) : (
             <>
               {searchOpen && (
                 <div className="sticky top-2 z-10 animate-in fade-in slide-in-from-top-4 duration-200 pointer-events-none pr-2 flex justify-end">
-                  <div className="pointer-events-auto">
-                    <SearchToolbar
-                      inputRef={searchInputRef}
-                      query={searchQuery}
-                      onChange={handleSearchChange}
-                      onNext={goToNextMatch}
-                      onPrevious={goToPreviousMatch}
-                      onClose={() => {
-                        setSearchOpen(false);
-                        setSearchQuery("");
-                        setReplaceQuery("");
-                        setIsReplaceOpen(false);
-                        setSearchMatches([]);
-                        setCurrentMatchIndex(0);
-                        // Clear decorations and refocus editor
-                        if (editor) {
-                          updateSearchDecorations([], 0, editor);
-                          editor.commands.focus();
-                        }
-                      }}
-                      currentMatch={
-                        searchMatches.length === 0 ? 0 : currentMatchIndex + 1
-                      }
-                      totalMatches={searchMatches.length}
-                      replaceQuery={replaceQuery}
-                      onReplaceChange={setReplaceQuery}
-                      onReplace={() => replaceCurrent(replaceQuery)}
-                      onReplaceAll={() => replaceAll(replaceQuery)}
-                      isReplaceOpen={isReplaceOpen}
-                      onToggleReplace={() => setIsReplaceOpen(!isReplaceOpen)}
-                    />
-                  </div>
+                  <div className="pointer-events-auto">{searchToolbar}</div>
                 </div>
               )}
               <div
-                className="h-full"
+                className="h-full note-accent"
+                style={
+                  noteColor
+                    ? ({ "--note-accent": noteColor } as React.CSSProperties)
+                    : undefined
+                }
                 onContextMenu={async (e) => {
                   if (!editor) return;
 

@@ -8,11 +8,15 @@ import { RefreshCwIcon, SpinnerIcon, GithubIcon } from "../icons";
 
 export function AboutSettingsSection() {
   const [appVersion, setAppVersion] = useState<string>("");
+  const [buildDate, setBuildDate] = useState<string>("");
   const [checkingUpdate, setCheckingUpdate] = useState(false);
 
   useEffect(() => {
     getVersion()
       .then(setAppVersion)
+      .catch(() => {});
+    invoke<string>("get_build_date")
+      .then(setBuildDate)
       .catch(() => {});
   }, []);
 
@@ -43,6 +47,7 @@ export function AboutSettingsSection() {
         <h2 className="text-xl font-medium mb-0.5">Version</h2>
         <p className="text-sm text-text-muted mb-4">
           You are currently using Scratch v{appVersion || "..."}
+          {buildDate && ` (built on ${buildDate})`}
         </p>
         <Button
           onClick={handleCheckForUpdates}

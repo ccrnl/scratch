@@ -2,6 +2,7 @@ import { useCallback, useMemo, memo, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import * as ContextMenu from "@radix-ui/react-context-menu";
 import { useNotes } from "../../context/NotesContext";
+import { onRevealNote, scrollNoteIntoView } from "../../lib/revealNote";
 import {
   ListItem,
   AlertDialog,
@@ -16,12 +17,16 @@ import {
 import { cleanTitle } from "../../lib/utils";
 import * as notesService from "../../services/notes";
 import { FolderTreeView } from "./FolderTreeView";
+import { MoveNoteDialog } from "./MoveNoteDialog";
 import {
   PinIcon,
   CopyIcon,
   TrashIcon,
+  FolderIcon,
+  SettingsIcon,
 } from "../icons";
-import type { Settings } from "../../types/note";
+import { ItemConfigDialog } from "./ItemConfigDialog";
+import type { Settings, ItemColorConfig } from "../../types/note";
 
 const menuItemClass =
   "px-3 py-1.5 text-sm text-text cursor-pointer outline-none hover:bg-bg-muted focus:bg-bg-muted flex items-center gap-2 rounded-sm";
@@ -70,8 +75,9 @@ interface NoteItemProps {
   preview?: string;
   modified: number;
   isSelected: boolean;
+  isMultiSelected: boolean;
   isPinned: boolean;
-  onSelect: (id: string) => void;
+  onSelect: (id: string, event: React.MouseEvent) => void;
   depth?: number;
   showFolderPrefix?: boolean;
 }
@@ -82,13 +88,17 @@ export const NoteItem = memo(function NoteItem({
   preview,
   modified,
   isSelected,
+  isMultiSelected,
   isPinned,
   onSelect,
   depth,
   showFolderPrefix = true,
 }: NoteItemProps) {
   const ref = useRef<HTMLDivElement>(null);
-  const handleClick = useCallback(() => onSelect(id), [onSelect, id]);
+  const handleClick = useCallback(
+    (event: React.MouseEvent) => onSelect(id, event),
+    [onSelect, id],
+  );
 
   useEffect(() => {
     if (isSelected) {
@@ -109,6 +119,7 @@ export const NoteItem = memo(function NoteItem({
   return (
     <div
       ref={ref}
+      data-note-id={id}
       style={depth != null ? { paddingLeft: `${depth * 12}px` } : undefined}
     >
       <ListItem
@@ -116,6 +127,7 @@ export const NoteItem = memo(function NoteItem({
         subtitle={displayPreview}
         meta={formatDate(modified)}
         isSelected={isSelected}
+        isMultiSelected={isMultiSelected}
         isPinned={isPinned}
         onClick={handleClick}
       />
@@ -130,13 +142,16 @@ interface NoteItemWithMenuProps {
   preview?: string;
   modified: number;
   isSelected: boolean;
+  isMultiSelected: boolean;
   isPinned: boolean;
-  onSelect: (id: string) => void;
+  onSelect: (id: string, event: React.MouseEvent) => void;
   onPin: (id: string) => Promise<void>;
   onUnpin: (id: string) => Promise<void>;
   onDuplicate: (id: string) => void;
   onDelete: (id: string) => void;
+  onMove: (id: string) => void;
   onRefreshSettings: () => Promise<void> | void;
+  onConfigure: (id: string, name: string) => void;
 }
 
 const NoteItemWithMenu = memo(function NoteItemWithMenu({
@@ -145,13 +160,16 @@ const NoteItemWithMenu = memo(function NoteItemWithMenu({
   preview,
   modified,
   isSelected,
+  isMultiSelected,
   isPinned,
   onSelect,
   onPin,
   onUnpin,
   onDuplicate,
   onDelete,
+  onMove,
   onRefreshSettings,
+  onConfigure,
 }: NoteItemWithMenuProps) {
   const handlePin = useCallback(async () => {
     try {
@@ -184,6 +202,7 @@ const NoteItemWithMenu = memo(function NoteItemWithMenu({
             preview={preview}
             modified={modified}
             isSelected={isSelected}
+            isMultiSelected={isMultiSelected}
             isPinned={isPinned}
             onSelect={onSelect}
           />
@@ -208,6 +227,22 @@ const NoteItemWithMenu = memo(function NoteItemWithMenu({
           >
             <CopyIcon className="w-4 h-4 stroke-[1.6]" />
             Copy Filepath
+          </ContextMenu.Item>
+          <ContextMenu.Separator className={menuSeparatorClass} />
+          <ContextMenu.Item
+            className={menuItemClass}
+            onSelect={() => onMove(id)}
+          >
+            <FolderIcon className="w-4 h-4 stroke-[1.6]" />
+            Move to...
+          </ContextMenu.Item>
+          <ContextMenu.Separator className={menuSeparatorClass} />
+          <ContextMenu.Item
+            className={menuItemClass}
+            onSelect={() => onConfigure(id, cleanTitle(title))}
+          >
+            <SettingsIcon className="w-4 h-4 stroke-[1.6]" />
+            Configure
           </ContextMenu.Item>
           <ContextMenu.Separator className={menuSeparatorClass} />
           <ContextMenu.Item
@@ -254,6 +289,8 @@ export function NoteList({
 
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [noteToDelete, setNoteToDelete] = useState<string | null>(null);
+  const [moveDialogOpen, setMoveDialogOpen] = useState(false);
+  const [noteToMove, setNoteToMove] = useState<string | null>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -290,9 +327,54 @@ export function NoteList({
     setDeleteDialogOpen(true);
   }, []);
 
+  const openMoveDialogForNote = useCallback((noteId: string) => {
+    setNoteToMove(noteId);
+    setMoveDialogOpen(true);
+  }, []);
+
   const refreshSettings = useCallback(() => {
     notesService.getSettings().then(setSettings);
   }, []);
+
+  const [configDialogOpen, setConfigDialogOpen] = useState(false);
+  const [configItemPath, setConfigItemPath] = useState("");
+  const [configItemName, setConfigItemName] = useState("");
+
+  const handleOpenConfigure = useCallback((id: string, name: string) => {
+    setConfigItemPath(id);
+    setConfigItemName(name);
+    setConfigDialogOpen(true);
+  }, []);
+
+  const handleSaveItemColor = useCallback(
+    (path: string, config: ItemColorConfig | null) => {
+      if (!settings) return;
+      const newItemColors = { ...(settings.itemColors ?? {}) };
+      if (config) {
+        newItemColors[path] = config;
+      } else {
+        delete newItemColors[path];
+      }
+      const newSettings = {
+        ...settings,
+        itemColors: Object.keys(newItemColors).length > 0 ? newItemColors : undefined,
+      };
+      notesService.updateSettings(newSettings).then(() => {
+        setSettings(newSettings);
+      });
+    },
+    [settings],
+  );
+
+  const handleRenameNote = useCallback(
+    async (oldPath: string, newName: string) => {
+      const newId = await notesService.renameNote(oldPath, newName);
+      if (selectedNoteId === oldPath) {
+        selectNote(newId);
+      }
+    },
+    [selectedNoteId, selectNote],
+  );
 
   // Memoize display items to prevent recalculation on every render
   const displayItems = useMemo(() => {
@@ -307,6 +389,65 @@ export function NoteList({
     return notes;
   }, [searchQuery, searchResults, notes]);
 
+  const displayNoteIds = useMemo(
+    () => displayItems.map((item) => item.id),
+    [displayItems],
+  );
+
+  const handleNoteSelect = useCallback(
+    (noteId: string, event: React.MouseEvent) => {
+      const isMeta = event.metaKey || event.ctrlKey;
+      const isShift = event.shiftKey;
+
+      if (isShift) {
+        const anchor = lastClickedNoteId ?? selectedNoteId;
+        let anchorIdx = anchor ? displayNoteIds.indexOf(anchor) : -1;
+        if (anchorIdx === -1 && selectedNoteId) {
+          anchorIdx = displayNoteIds.indexOf(selectedNoteId);
+        }
+        const targetIdx = displayNoteIds.indexOf(noteId);
+
+        if (anchorIdx !== -1 && targetIdx !== -1) {
+          const start = Math.min(anchorIdx, targetIdx);
+          const end = Math.max(anchorIdx, targetIdx);
+          const range = new Set(displayNoteIds.slice(start, end + 1));
+          if (selectedNoteId) range.add(selectedNoteId);
+          setMultiSelectedNoteIds(range);
+        }
+        return;
+      }
+
+      if (isMeta) {
+        setMultiSelectedNoteIds((prev) => {
+          const next = new Set(prev);
+          if (selectedNoteId && !next.has(selectedNoteId)) {
+            next.add(selectedNoteId);
+          }
+          if (next.has(noteId)) {
+            next.delete(noteId);
+          } else {
+            next.add(noteId);
+          }
+          return next;
+        });
+        setLastClickedNoteId(noteId);
+        return;
+      }
+
+      setMultiSelectedNoteIds(new Set([noteId]));
+      setLastClickedNoteId(noteId);
+      selectNote(noteId);
+    },
+    [
+      displayNoteIds,
+      lastClickedNoteId,
+      selectedNoteId,
+      selectNote,
+      setLastClickedNoteId,
+      setMultiSelectedNoteIds,
+    ],
+  );
+
   // Listen for focus request from editor (when Escape is pressed)
   useEffect(() => {
     const handleFocusNoteList = () => {
@@ -317,6 +458,8 @@ export function NoteList({
     return () =>
       window.removeEventListener("focus-note-list", handleFocusNoteList);
   }, []);
+
+  useEffect(() => onRevealNote(scrollNoteIntoView), []);
 
   useEffect(() => {
     const handleRequestDelete = (event: Event) => {
@@ -368,6 +511,17 @@ export function NoteList({
           setMultiSelectedNoteIds={setMultiSelectedNoteIds}
           lastClickedNoteId={lastClickedNoteId}
           setLastClickedNoteId={setLastClickedNoteId}
+          onMoveNote={openMoveDialogForNote}
+          onSettingsChange={setSettings}
+        />
+
+        <MoveNoteDialog
+          open={moveDialogOpen}
+          noteId={noteToMove}
+          onOpenChange={(open) => {
+            setMoveDialogOpen(open);
+            if (!open) setNoteToMove(null);
+          }}
         />
 
         {/* Delete confirmation dialog */}
@@ -411,16 +565,39 @@ export function NoteList({
             preview={item.preview}
             modified={item.modified}
             isSelected={selectedNoteId === item.id}
+            isMultiSelected={multiSelectedNoteIds.has(item.id)}
             isPinned={pinnedIds.has(item.id)}
-            onSelect={selectNote}
+            onSelect={handleNoteSelect}
             onPin={pinNote}
             onUnpin={unpinNote}
             onDuplicate={duplicateNote}
             onDelete={openDeleteDialogForNote}
+            onMove={openMoveDialogForNote}
             onRefreshSettings={refreshSettings}
+            onConfigure={handleOpenConfigure}
           />
         ))}
       </div>
+
+      <ItemConfigDialog
+        open={configDialogOpen}
+        onOpenChange={setConfigDialogOpen}
+        itemPath={configItemPath}
+        itemName={configItemName}
+        itemType="note"
+        currentConfig={settings?.itemColors?.[configItemPath] ?? null}
+        onSave={handleSaveItemColor}
+        onRename={handleRenameNote}
+      />
+
+      <MoveNoteDialog
+        open={moveDialogOpen}
+        noteId={noteToMove}
+        onOpenChange={(open) => {
+          setMoveDialogOpen(open);
+          if (!open) setNoteToMove(null);
+        }}
+      />
 
       {/* Delete confirmation dialog */}
       <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
