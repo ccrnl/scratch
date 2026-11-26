@@ -39,6 +39,7 @@ import {
 } from "../icons";
 import * as notesService from "../../services/notes";
 import { resolveItemColor } from "../../lib/itemColor";
+import { onRevealNote } from "../../lib/revealNote";
 import type { FolderNode, NoteMetadata, Settings, ItemColorConfig } from "../../types/note";
 
 const STORAGE_KEY = "scratch:collapsedFolders";
@@ -198,6 +199,7 @@ const FileItem = memo(function FileItem({
           }}
           {...attributes}
           {...listeners}
+          data-note-id={note.id}
           className={`flex items-center gap-1.5 py-1.5 cursor-pointer rounded-md select-none transition-colors ${
             isDragging
               ? "opacity-40"
@@ -779,6 +781,16 @@ export function FolderTreeView({
     window.addEventListener("expand-folder", handler);
     return () => window.removeEventListener("expand-folder", handler);
   }, [expandFolder]);
+
+  // Expand the folders containing a note that the editor asks to reveal
+  useEffect(
+    () =>
+      onRevealNote((noteId) => {
+        const lastSlash = noteId.lastIndexOf("/");
+        if (lastSlash > 0) expandFolder(noteId.substring(0, lastSlash));
+      }),
+    [expandFolder],
+  );
 
   const handleNewSubfolder = useCallback((parentPath: string) => {
     setSubfolderParent(parentPath);

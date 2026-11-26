@@ -191,6 +191,7 @@ import {
   CopyIcon,
   DownloadIcon,
   ShareIcon,
+  LocateIcon,
   PanelLeftIcon,
   RefreshCwIcon,
   PinIcon,
@@ -697,6 +698,7 @@ export interface PreviewModeData {
 
 interface EditorProps {
   onToggleSidebar?: () => void;
+  onRevealInSidebar?: () => void;
   sidebarVisible?: boolean;
   focusMode?: boolean;
   previewMode?: PreviewModeData;
@@ -760,6 +762,7 @@ function blockIndexToPos(
 
 export function Editor({
   onToggleSidebar,
+  onRevealInSidebar,
   sidebarVisible,
   focusMode,
   onEditorReady,
@@ -2792,6 +2795,13 @@ export function Editor({
               <div className="h-7 w-7 flex items-center justify-center rounded-full">
                 <CircleCheckIcon className="w-4.5 h-4.5 mt-px stroke-[1.5] text-text-muted/40" />
               </div>
+            </Tooltip>
+          )}
+          {currentNote && onRevealInSidebar && (
+            <Tooltip content="Show in sidebar">
+              <IconButton onClick={onRevealInSidebar}>
+                <LocateIcon className="w-5 h-5 stroke-[1.3]" />
+              </IconButton>
             </Tooltip>
           )}
           {currentNote && pinNote && unpinNote && (

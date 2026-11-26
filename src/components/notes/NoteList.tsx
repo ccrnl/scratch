@@ -2,6 +2,7 @@ import { useCallback, useMemo, memo, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import * as ContextMenu from "@radix-ui/react-context-menu";
 import { useNotes } from "../../context/NotesContext";
+import { onRevealNote, scrollNoteIntoView } from "../../lib/revealNote";
 import {
   ListItem,
   AlertDialog,
@@ -118,6 +119,7 @@ export const NoteItem = memo(function NoteItem({
   return (
     <div
       ref={ref}
+      data-note-id={id}
       style={depth != null ? { paddingLeft: `${depth * 12}px` } : undefined}
     >
       <ListItem
@@ -456,6 +458,8 @@ export function NoteList({
     return () =>
       window.removeEventListener("focus-note-list", handleFocusNoteList);
   }, []);
+
+  useEffect(() => onRevealNote(scrollNoteIntoView), []);
 
   useEffect(() => {
     const handleRequestDelete = (event: Event) => {

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { toast } from "sonner";
 import { NotesProvider, useNotes } from "./context/NotesContext";
+import { requestRevealNote } from "./lib/revealNote";
 import { ThemeProvider, useTheme } from "./context/ThemeContext";
 import { listen } from "@tauri-apps/api/event";
 import { GitProvider } from "./context/GitContext";
@@ -72,6 +73,7 @@ function AppContent() {
     reloadCurrentNote,
     currentNote,
     syncNotesFolder,
+    clearSearch,
   } = useNotes();
   const { interfaceZoom, setInterfaceZoom, reloadSettings } = useTheme();
   const interfaceZoomRef = useRef(interfaceZoom);
@@ -156,6 +158,14 @@ function AppContent() {
       unlisten?.();
     };
   }, [syncNotesFolder, reloadSettings]);
+
+  const revealSelectedNote = useCallback(() => {
+    if (!selectedNoteId) return;
+    setSidebarVisible(true);
+    clearSearch();
+    // Let the tree remount (after a search) before asking it to expand and scroll
+    window.setTimeout(() => requestRevealNote(selectedNoteId), 50);
+  }, [selectedNoteId, clearSearch]);
 
   const toggleSidebar = useCallback(() => {
     setSidebarVisible((prev) => !prev);
@@ -561,6 +571,7 @@ function AppContent() {
             </div>
             <Editor
               onToggleSidebar={toggleSidebar}
+              onRevealInSidebar={revealSelectedNote}
               sidebarVisible={sidebarVisible}
               focusMode={focusMode}
               onEditorReady={(editor) => {
