@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   type KeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
@@ -180,7 +181,7 @@ function RunCard({ run }: { run: Run }) {
 
           {run.status !== "running" && run.usage && (
             <Tooltip content={describeUsage(run.usage)}>
-              <div className="text-[11px] tabular-nums text-text-muted/60 pt-0.5">
+              <div className="text-xs tabular-nums text-text pt-1">
                 {formatUsage(run.usage)}
               </div>
             </Tooltip>
@@ -229,6 +230,32 @@ function PickerSelect({
   );
 }
 
+const PANEL_WIDTH_KEY = "scratch:aiSidebarWidth";
+const PANEL_DEFAULT_WIDTH = 360;
+const PANEL_MIN_WIDTH = 280;
+const PANEL_MAX_WIDTH = 720;
+
+function clampPanelWidth(width: number): number {
+  return Math.min(Math.max(Math.round(width), PANEL_MIN_WIDTH), PANEL_MAX_WIDTH);
+}
+
+function loadPanelWidth(): number {
+  try {
+    const stored = Number(localStorage.getItem(PANEL_WIDTH_KEY));
+    return stored ? clampPanelWidth(stored) : PANEL_DEFAULT_WIDTH;
+  } catch {
+    return PANEL_DEFAULT_WIDTH;
+  }
+}
+
+function savePanelWidth(width: number) {
+  try {
+    localStorage.setItem(PANEL_WIDTH_KEY, String(width));
+  } catch {
+    // Ignore localStorage errors
+  }
+}
+
 // Sentinel option that swaps the model dropdown for a free-text field, so a
 // model that postdates AI_PROVIDER_MODELS is still reachable.
 const CUSTOM_MODEL_VALUE = "__custom__";
@@ -255,6 +282,54 @@ export function AiSidebar({
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
   const Icon = providerIcons[provider];
+  const [width, setWidth] = useState(loadPanelWidth);
+  const dragRef = useRef<{ pointerId: number; x: number; width: number } | null>(
+    null,
+  );
+
+  // The panel sits on the right edge, so dragging its left edge leftwards widens it.
+  const handleResizeDown = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      dragRef.current = { pointerId: event.pointerId, x: event.clientX, width };
+      event.currentTarget.setPointerCapture(event.pointerId);
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+    },
+    [width],
+  );
+
+  const handleResizeMove = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      const drag = dragRef.current;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      setWidth(clampPanelWidth(drag.width + drag.x - event.clientX));
+    },
+    [],
+  );
+
+  const handleResizeEnd = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      const drag = dragRef.current;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      dragRef.current = null;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      const next = clampPanelWidth(drag.width + drag.x - event.clientX);
+      setWidth(next);
+      savePanelWidth(next);
+    },
+    [],
+  );
+
+  const resetWidth = useCallback(() => {
+    setWidth(PANEL_DEFAULT_WIDTH);
+    savePanelWidth(PANEL_DEFAULT_WIDTH);
+  }, []);
 
   useEffect(() => {
     if (open && !isExecuting) inputRef.current?.focus();
@@ -432,9 +507,22 @@ export function AiSidebar({
 
   return (
     <aside
-      className="w-90 shrink-0 border-l border-border bg-bg-secondary flex flex-col min-h-0"
+      style={{ width }}
+      className="relative shrink-0 border-l border-border bg-bg-secondary flex flex-col min-h-0"
       aria-label="AI assistant"
     >
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize AI assistant"
+        title="Drag to resize, double-click to reset"
+        className="absolute left-0 top-0 z-10 h-full w-1.5 cursor-col-resize hover:bg-text-muted/20 active:bg-text-muted/30 transition-colors"
+        onPointerDown={handleResizeDown}
+        onPointerMove={handleResizeMove}
+        onPointerUp={handleResizeEnd}
+        onPointerCancel={handleResizeEnd}
+        onDoubleClick={resetWidth}
+      />
       <header className="h-11 shrink-0 border-b border-border flex items-center justify-between px-3">
         <div className="flex items-center gap-2 min-w-0">
           <Icon className="w-4.5 h-4.5 shrink-0 stroke-[1.5] text-text-muted" />
@@ -478,7 +566,7 @@ export function AiSidebar({
       </div>
 
       {sessionUsage && (
-        <div className="shrink-0 border-t border-border px-3 py-1.5 text-[11px] tabular-nums text-text-muted/70 flex items-center justify-between">
+        <div className="shrink-0 border-t border-border px-3 py-2 text-xs tabular-nums text-text flex items-center justify-between">
           <span>Session</span>
           <Tooltip content={describeUsage(sessionUsage)}>
             <span>{formatUsage(sessionUsage)}</span>
