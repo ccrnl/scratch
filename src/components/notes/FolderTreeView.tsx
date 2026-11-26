@@ -32,6 +32,7 @@ import {
   FolderPlusIcon,
   PencilIcon,
   TrashIcon,
+  TagIcon,
   NoteIcon,
   PinIcon,
   CopyIcon,
@@ -41,7 +42,13 @@ import {
 import * as notesService from "../../services/notes";
 import { resolveItemColor } from "../../lib/itemColor";
 import { onRevealNote } from "../../lib/revealNote";
-import type { FolderNode, NoteMetadata, Settings, ItemColorConfig } from "../../types/note";
+import type {
+  FolderNode,
+  NoteMetadata,
+  Settings,
+  SmartFolder,
+  ItemColorConfig,
+} from "../../types/note";
 
 const STORAGE_KEY = "scratch:collapsedFolders";
 
@@ -346,6 +353,8 @@ interface FolderItemProps {
   pinnedIds: Set<string>;
   multiSelectedNoteIds: Set<string>;
   onNoteClick: (id: string, event: React.MouseEvent) => void;
+  /** Plain selection, without the modifier handling of a note click. */
+  onSelectNote: (id: string) => void;
   focusedItemKey: string | null;
   onCreateNoteHere: (path: string) => void;
   onNewSubfolder: (parentPath: string) => void;
@@ -358,6 +367,7 @@ interface FolderItemProps {
   onMoveNote: (id: string) => void;
   onMoveNoteToParent: (id: string, targetFolder: string) => void;
   onMoveFolderToParent: (path: string, targetParent: string) => void;
+  onRemoveSmartFolder: (tag: string) => void;
   itemColors: Record<string, ItemColorConfig>;
   onConfigure: (path: string, name: string, type: "folder" | "note") => void;
 }
@@ -371,6 +381,7 @@ const FolderItemComponent = memo(function FolderItem({
   pinnedIds,
   multiSelectedNoteIds,
   onNoteClick,
+  onSelectNote,
   focusedItemKey,
   onCreateNoteHere,
   onNewSubfolder,
@@ -383,9 +394,13 @@ const FolderItemComponent = memo(function FolderItem({
   onMoveNote,
   onMoveNoteToParent,
   onMoveFolderToParent,
+  onRemoveSmartFolder,
   itemColors,
   onConfigure,
 }: FolderItemProps) {
+  // A smart folder is a saved tag query, not a directory: it cannot be
+  // dragged, dropped into, renamed on disk, or hold subfolders.
+  const isSmart = folder.smartTag !== undefined;
   const isCollapsed = collapsedFolders.has(folder.path);
   const noteCount = countNotesInFolder(folder);
   const isEmpty = noteCount === 0 && folder.children.length === 0;
@@ -409,9 +424,22 @@ const FolderItemComponent = memo(function FolderItem({
     [itemColors],
   );
 
+  // Expanding a folder jumps straight to what was pinned in it; notes are
+  // already sorted pinned-first, so the first match is the one to land on.
+  // Collapsing leaves the open note alone.
   const handleClick = useCallback(() => {
     onToggleCollapse(folder.path);
-  }, [onToggleCollapse, folder.path]);
+    if (!isCollapsed) return;
+    const firstPinned = folder.notes.find((note) => pinnedIds.has(note.id));
+    if (firstPinned) onSelectNote(firstPinned.id);
+  }, [
+    onToggleCollapse,
+    onSelectNote,
+    isCollapsed,
+    folder.path,
+    folder.notes,
+    pinnedIds,
+  ]);
 
   const {
     attributes,
@@ -421,11 +449,13 @@ const FolderItemComponent = memo(function FolderItem({
   } = useDraggable({
     id: `folder:${folder.path}`,
     data: { type: "folder", path: folder.path },
+    disabled: isSmart,
   });
 
   const { setNodeRef: setDropRef, isOver } = useDroppable({
     id: `drop-folder:${folder.path}`,
     data: { type: "folder", path: folder.path },
+    disabled: isSmart,
   });
 
   return (
@@ -476,8 +506,14 @@ const FolderItemComponent = memo(function FolderItem({
             {folderConfig?.icon && (
               <span className="text-sm shrink-0 leading-none">{folderConfig.icon}</span>
             )}
+            {isSmart && (
+              <TagIcon className="w-3.5 h-3.5 stroke-[1.6] text-text-muted/60 shrink-0" />
+            )}
             <div className="flex flex-col min-w-0">
-              <span className={`text-sm truncate ${isColored ? "" : "text-text-muted"} ${folderConfig?.bold ? "font-bold" : ""}`}>
+              <span
+                className={`text-sm truncate ${isColored ? "" : "text-text-muted"} ${folderConfig?.bold ? "font-bold" : ""}`}
+                title={isSmart ? `Notes tagged #${folder.smartTag}` : undefined}
+              >
                 {folder.name}
               </span>
               {folderConfig?.description && (
@@ -502,6 +538,7 @@ const FolderItemComponent = memo(function FolderItem({
                   pinnedIds={pinnedIds}
                   multiSelectedNoteIds={multiSelectedNoteIds}
                   onNoteClick={onNoteClick}
+                  onSelectNote={onSelectNote}
                   onCreateNoteHere={onCreateNoteHere}
                   onNewSubfolder={onNewSubfolder}
                   onRenameFolder={onRenameFolder}
@@ -513,6 +550,7 @@ const FolderItemComponent = memo(function FolderItem({
                   onMoveNote={onMoveNote}
                   onMoveNoteToParent={onMoveNoteToParent}
                   onMoveFolderToParent={onMoveFolderToParent}
+                  onRemoveSmartFolder={onRemoveSmartFolder}
                   itemColors={itemColors}
                   onConfigure={onConfigure}
                 />
@@ -543,7 +581,7 @@ const FolderItemComponent = memo(function FolderItem({
                   className="text-sm text-text-muted/50 py-1 select-none"
                   style={{ paddingLeft: `${(depth + 1) * 12 + 24}px` }}
                 >
-                  Empty
+                  {isSmart ? `No notes tagged #${folder.smartTag}` : "Empty"}
                 </div>
               )}
             </div>
@@ -552,6 +590,16 @@ const FolderItemComponent = memo(function FolderItem({
       </ContextMenu.Trigger>
       <ContextMenu.Portal>
         <ContextMenu.Content className="min-w-44 bg-bg border border-border rounded-md shadow-lg py-1 z-50">
+          {isSmart ? (
+            <ContextMenu.Item
+              className={menuItemClass}
+              onSelect={() => onRemoveSmartFolder(folder.smartTag!)}
+            >
+              <TrashIcon className="w-4 h-4 stroke-[1.6]" />
+              Remove Smart Folder
+            </ContextMenu.Item>
+          ) : (
+          <>
           <ContextMenu.Item
             className={menuItemClass}
             onSelect={() => onCreateNoteHere(folder.path)}
@@ -625,6 +673,8 @@ const FolderItemComponent = memo(function FolderItem({
             <TrashIcon className="w-4 h-4 stroke-[1.6]" />
             Delete Folder
           </ContextMenu.Item>
+          </>
+          )}
         </ContextMenu.Content>
       </ContextMenu.Portal>
     </ContextMenu.Root>
@@ -681,6 +731,7 @@ export function FolderTreeView({
   const [noteToDelete, setNoteToDelete] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [knownFolders, setKnownFolders] = useState<string[]>([]);
+  const [smartFolders, setSmartFolders] = useState<SmartFolder[]>([]);
   const [configDialogOpen, setConfigDialogOpen] = useState(false);
   const [configItemPath, setConfigItemPath] = useState("");
   const [configItemName, setConfigItemName] = useState("");
@@ -744,14 +795,42 @@ export function FolderTreeView({
       .catch(() => setKnownFolders([]));
   }, [notes]);
 
+  // Smart folder definitions live in settings; their contents are derived
+  // from `notes` below, so they refresh whenever notes do.
+  useEffect(() => {
+    notesService
+      .getSettings()
+      .then((settings) => setSmartFolders(settings.smartFolders ?? []))
+      .catch(() => setSmartFolders([]));
+  }, [notes]);
+
   // Persist collapsed state
   useEffect(() => {
     saveCollapsedFolders(collapsedFolders);
   }, [collapsedFolders]);
 
   const tree = useMemo(
-    () => buildFolderTree(notes, pinnedIds, knownFolders),
-    [notes, pinnedIds, knownFolders],
+    () => buildFolderTree(notes, pinnedIds, knownFolders, smartFolders),
+    [notes, pinnedIds, knownFolders, smartFolders],
+  );
+
+  const handleRemoveSmartFolder = useCallback(
+    async (tag: string) => {
+      try {
+        const settings = await notesService.getSettings();
+        await notesService.updateSettings({
+          ...settings,
+          smartFolders: (settings.smartFolders ?? []).filter(
+            (folder) => folder.tag !== tag,
+          ),
+        });
+        setSmartFolders((prev) => prev.filter((folder) => folder.tag !== tag));
+      } catch (error) {
+        console.error("Failed to remove smart folder:", error);
+        toast.error("Failed to remove smart folder");
+      }
+    },
+    [],
   );
 
   const handleToggleCollapse = useCallback((path: string) => {
@@ -1131,6 +1210,7 @@ export function FolderTreeView({
             pinnedIds={pinnedIds}
             multiSelectedNoteIds={multiSelectedNoteIds}
             onNoteClick={handleNoteClick}
+            onSelectNote={selectNote}
             onCreateNoteHere={createNoteInFolder}
             onNewSubfolder={handleNewSubfolder}
             onRenameFolder={handleRenameFolder}
@@ -1142,6 +1222,7 @@ export function FolderTreeView({
             onMoveNote={onMoveNote}
             onMoveNoteToParent={moveNote}
             onMoveFolderToParent={moveFolder}
+            onRemoveSmartFolder={handleRemoveSmartFolder}
             itemColors={itemColors}
             onConfigure={handleOpenConfigure}
           />

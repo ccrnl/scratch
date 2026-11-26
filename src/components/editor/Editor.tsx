@@ -39,7 +39,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { toast } from "sonner";
-import { mod, alt, shift, isMac } from "../../lib/platform";
+import { mod, alt, shift, isMac, isWindows } from "../../lib/platform";
 
 // Prepend https:// if no protocol is present
 function normalizeUrl(url: string): string {
@@ -199,6 +199,7 @@ import {
   MarkdownIcon,
   MarkdownOffIcon,
   FolderPlusIcon,
+  ClaudeIcon,
 } from "../icons";
 
 function formatDateTime(timestamp: number): string {
@@ -698,6 +699,8 @@ export interface PreviewModeData {
 
 interface EditorProps {
   onToggleSidebar?: () => void;
+  onToggleAiSidebar?: () => void;
+  aiSidebarOpen?: boolean;
   onRevealInSidebar?: () => void;
   sidebarVisible?: boolean;
   focusMode?: boolean;
@@ -762,6 +765,8 @@ function blockIndexToPos(
 
 export function Editor({
   onToggleSidebar,
+  onToggleAiSidebar,
+  aiSidebarOpen,
   onRevealInSidebar,
   sidebarVisible,
   focusMode,
@@ -1452,6 +1457,9 @@ export function Editor({
       attributes: {
         class:
           "prose prose-lg dark:prose-invert max-w-3xl mx-auto focus:outline-none min-h-full px-6 pt-8 pb-24",
+        spellcheck: "true",
+        autocorrect: "on",
+        autocapitalize: "sentences",
       },
       // Serialize copied text as markdown instead of plain text
       clipboardTextSerializer: (slice) => {
@@ -2338,14 +2346,22 @@ export function Editor({
     });
   }, []);
 
-  // Cmd+F to open search (works when document/editor area is focused)
+  // Cmd/Ctrl+F to open search, ⌥⌘F (macOS) / Ctrl+H to open replace
+  // (works when document/editor area is focused)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (
+      const openFind =
         (e.metaKey || e.ctrlKey) &&
         !e.shiftKey &&
-        e.key.toLowerCase() === "f"
-      ) {
+        !e.altKey &&
+        e.key.toLowerCase() === "f";
+      // Cmd+H is reserved by macOS (Hide), so replace uses the platform
+      // convention: ⌥⌘F on macOS, Ctrl+H elsewhere. e.code is checked on
+      // macOS because ⌥ changes e.key to a special character ("ƒ").
+      const openReplace = isMac
+        ? e.metaKey && e.altKey && !e.shiftKey && e.code === "KeyF"
+        : e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "h";
+      if (openFind || openReplace) {
         if (!currentNote || !editor) return;
 
         const target = e.target as HTMLElement;
@@ -2641,10 +2657,12 @@ export function Editor({
     if (previewMode) {
       return (
         <div className="flex-1 flex flex-col bg-bg">
-          <div
-            className="h-10 shrink-0 flex items-end px-4 pb-1"
-            data-tauri-drag-region
-          ></div>
+          {!isWindows && (
+            <div
+              className="h-10 shrink-0 flex items-end px-4 pb-1"
+              data-tauri-drag-region
+            ></div>
+          )}
           <div className="flex-1 flex items-center justify-center">
             <SpinnerIcon className="w-6 h-6 text-text-muted animate-spin" />
           </div>
@@ -2656,10 +2674,12 @@ export function Editor({
     if (notesCtx?.selectedNoteId) {
       return (
         <div className="flex-1 flex flex-col bg-bg">
-          <div
-            className="h-10 shrink-0 flex items-end px-4 pb-1"
-            data-tauri-drag-region
-          ></div>
+          {!isWindows && (
+            <div
+              className="h-10 shrink-0 flex items-end px-4 pb-1"
+              data-tauri-drag-region
+            ></div>
+          )}
           <div className="flex-1 flex items-center justify-center">
             <SpinnerIcon className="w-6 h-6 text-text-muted animate-spin" />
           </div>
@@ -2671,10 +2691,12 @@ export function Editor({
     return (
       <div className="flex-1 flex flex-col bg-bg">
         {/* Drag region */}
-        <div
-          className="h-10 shrink-0 flex items-end px-4 pb-1"
-          data-tauri-drag-region
-        ></div>
+        {!isWindows && (
+          <div
+            className="h-10 shrink-0 flex items-end px-4 pb-1"
+            data-tauri-drag-region
+          ></div>
+        )}
         <div className="flex-1 flex items-center justify-center pb-8">
           <div className="text-center text-text-muted select-none">
             <div
@@ -2745,7 +2767,7 @@ export function Editor({
       <div
         className={cn(
           "h-11 shrink-0 flex items-center justify-between px-3",
-          !isSidebarActive && "pl-22",
+          !isSidebarActive && !isWindows && "pl-22",
         )}
         data-tauri-drag-region
       >
@@ -2836,6 +2858,20 @@ export function Editor({
                     isPinned && "fill-current",
                   )}
                 />
+              </IconButton>
+            </Tooltip>
+          )}
+          {currentNote && onToggleAiSidebar && (
+            <Tooltip
+              content={`AI assistant (${mod}${isMac ? "" : "+"}${shift}${isMac ? "" : "+"}A)`}
+            >
+              <IconButton
+                onClick={onToggleAiSidebar}
+                aria-label="AI assistant"
+                aria-pressed={aiSidebarOpen}
+                className={cn(aiSidebarOpen && "bg-bg-muted text-text")}
+              >
+                <ClaudeIcon className="w-4.5 h-4.5 stroke-[1.5]" />
               </IconButton>
             </Tooltip>
           )}
@@ -2967,7 +3003,7 @@ export function Editor({
         <div
           data-editor-scroll
           ref={scrollContainerRef}
-          className="absolute inset-0 overflow-y-auto overflow-x-hidden"
+          className="absolute inset-0 overflow-y-auto overflow-x-hidden scrollbar-minimal"
           dir={textDirection}
         >
           {sourceMode ? (

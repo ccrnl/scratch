@@ -1540,3 +1540,67 @@ export function LocateIcon({ className = "w-4.5 h-4.5" }: IconProps) {
     </svg>
   );
 }
+
+export function TagIcon({ className = "w-4.5 h-4.5" }: IconProps) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      viewBox="0 0 24 24"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M7.5 7.5m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0" />
+      <path d="M3 6v5.172a2 2 0 0 0 .586 1.414l7.71 7.71a2.41 2.41 0 0 0 3.408 0l5.592 -5.592a2.41 2.41 0 0 0 0 -3.408l-7.71 -7.71a2 2 0 0 0 -1.414 -.586h-5.172a3 3 0 0 0 -3 3z" />
+    </svg>
+  );
+}
+
+export function ReplaceIcon({ className = "w-4.5 h-4.5" }: IconProps) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      viewBox="0 0 24 24"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M14 4a1 1 0 0 1 1-1" />
+      <path d="M15 10a1 1 0 0 1-1-1" />
+      <path d="M21 4a1 1 0 0 0-1-1" />
+      <path d="M21 9a1 1 0 0 1-1 1" />
+      <path d="m3 7 3 3 3-3" />
+      <path d="M6 10V5a2 2 0 0 1 2-2h2" />
+      <rect x="3" y="14" width="7" height="7" rx="1" />
+    </svg>
+  );
+}
+
+export function ReplaceAllIcon({ className = "w-4.5 h-4.5" }: IconProps) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      viewBox="0 0 24 24"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M14 14a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1" />
+      <path d="M14 4a1 1 0 0 1 1-1" />
+      <path d="M15 10a1 1 0 0 1-1-1" />
+      <path d="M19 14a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1" />
+      <path d="M21 4a1 1 0 0 0-1-1" />
+      <path d="M21 9a1 1 0 0 1-1 1" />
+      <path d="m3 7 3 3 3-3" />
+      <path d="M6 10V5a2 2 0 0 1 2-2h2" />
+      <rect x="3" y="14" width="7" height="7" rx="1" />
+    </svg>
+  );
+}

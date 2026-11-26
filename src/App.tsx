@@ -20,6 +20,7 @@ import {
   OllamaIcon,
 } from "./components/icons";
 import { AiEditModal } from "./components/ai/AiEditModal";
+import { AiSidebar } from "./components/ai/AiSidebar";
 import { AiResponseToast } from "./components/ai/AiResponseToast";
 import { KeyboardShortcutsModal } from "./components/shortcuts/KeyboardShortcutsModal";
 import { PreviewApp } from "./components/preview/PreviewApp";
@@ -31,6 +32,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import * as aiService from "./services/ai";
 import * as notesService from "./services/notes";
 import type { AiProvider } from "./services/ai";
+import { isMac, isWindows } from "./lib/platform";
 
 // Detect preview mode from URL search params
 function getWindowMode(): {
@@ -47,6 +49,8 @@ function getWindowMode(): {
 }
 
 type ViewState = "notes" | "settings";
+
+type AiRunTarget = "modal" | "sidebar";
 
 const DEFAULT_SIDEBAR_WIDTH = 256;
 const MIN_SIDEBAR_WIDTH = 200;
@@ -86,6 +90,7 @@ function AppContent() {
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
   const [sidebarResizing, setSidebarResizing] = useState(false);
   const [aiModalOpen, setAiModalOpen] = useState(false);
+  const [aiSidebarOpen, setAiSidebarOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [aiEditing, setAiEditing] = useState(false);
   const [focusMode, setFocusMode] = useState(false);
@@ -197,12 +202,19 @@ function AppContent() {
     setPaletteOpen(true);
   }, []);
 
-  // AI Edit handler
+  // Where an AI run's result is surfaced: the modal hands off to a toast,
+  // the sidebar renders it inline in its transcript.
   const handleAiEdit = useCallback(
-    async (prompt: string, ollamaModel?: string) => {
+    async (
+      prompt: string,
+      model?: string,
+      effort?: aiService.AiEffort,
+      target: AiRunTarget = "modal",
+      runId?: string,
+    ): Promise<aiService.AiExecutionResult | null> => {
       if (!currentNote) {
         toast.error("No note selected");
-        return;
+        return null;
       }
 
       setAiEditing(true);
@@ -210,21 +222,42 @@ function AppContent() {
       try {
         let result: aiService.AiExecutionResult;
         if (aiProvider === "codex") {
-          result = await aiService.executeCodexEdit(currentNote.path, prompt);
+          result = await aiService.executeCodexEdit(
+            currentNote.path,
+            prompt,
+            runId,
+            model,
+            effort,
+          );
         } else if (aiProvider === "opencode") {
-          result = await aiService.executeOpenCodeEdit(currentNote.path, prompt);
+          result = await aiService.executeOpenCodeEdit(
+            currentNote.path,
+            prompt,
+            model,
+          );
         } else if (aiProvider === "ollama") {
           result = await aiService.executeOllamaEdit(
             currentNote.path,
             prompt,
-            ollamaModel || "qwen3:8b",
+            model || aiService.OLLAMA_FALLBACK_MODEL,
           );
         } else {
-          result = await aiService.executeClaudeEdit(currentNote.path, prompt);
+          result = await aiService.executeClaudeEdit(
+            currentNote.path,
+            prompt,
+            runId,
+            model,
+            effort,
+          );
         }
 
         // Reload the current note from disk
         await reloadCurrentNote();
+
+        // The sidebar renders its own transcript; only the modal hands off to a toast.
+        if (target === "sidebar") {
+          return result;
+        }
 
         // Show results
         if (result.success) {
@@ -249,16 +282,31 @@ function AppContent() {
             { duration: Infinity, closeButton: true },
           );
         }
+        return result;
       } catch (error) {
         console.error("[AI] Error:", error);
-        toast.error(
-          `Error: ${error instanceof Error ? error.message : "Unknown error"}`,
-        );
+        const message =
+          error instanceof Error ? error.message : "Unknown error";
+        if (target === "sidebar") {
+          return { success: false, output: "", error: message };
+        }
+        toast.error(`Error: ${message}`);
+        return null;
       } finally {
         setAiEditing(false);
       }
     },
     [aiProvider, currentNote, reloadCurrentNote],
+  );
+
+  const handleAiSidebarExecute = useCallback(
+    (
+      prompt: string,
+      runId: string,
+      model: string | undefined,
+      effort: aiService.AiEffort | undefined,
+    ) => handleAiEdit(prompt, model, effort, "sidebar", runId),
+    [handleAiEdit],
   );
 
   // Memoize display items to prevent unnecessary recalculations
@@ -318,6 +366,18 @@ function AppContent() {
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === "Enter") {
         e.preventDefault();
         toggleFocusMode();
+        return;
+      }
+
+      // Cmd+Shift+A - Toggle the AI assistant sidebar
+      if (
+        (e.metaKey || e.ctrlKey) &&
+        e.shiftKey &&
+        e.key.toLowerCase() === "a" &&
+        currentNoteRef.current
+      ) {
+        e.preventDefault();
+        setAiSidebarOpen((open) => !open);
         return;
       }
 
@@ -572,11 +632,23 @@ function AppContent() {
             <Editor
               onToggleSidebar={toggleSidebar}
               onRevealInSidebar={revealSelectedNote}
+              onToggleAiSidebar={() => setAiSidebarOpen((open) => !open)}
+              aiSidebarOpen={aiSidebarOpen && !focusMode}
               sidebarVisible={sidebarVisible}
               focusMode={focusMode}
               onEditorReady={(editor) => {
                 editorRef.current = editor;
               }}
+            />
+            <AiSidebar
+              open={aiSidebarOpen && !focusMode && Boolean(currentNote)}
+              provider={aiProvider}
+              noteTitle={currentNote?.title}
+              noteId={currentNote?.id}
+              onProviderChange={setAiProvider}
+              onClose={() => setAiSidebarOpen(false)}
+              onExecute={handleAiSidebarExecute}
+              isExecuting={aiEditing}
             />
           </>
         )}
@@ -585,7 +657,7 @@ function AppContent() {
       {/* Shared backdrop for command palette and AI modal */}
       {(paletteOpen || aiModalOpen) && (
         <div
-          className="fixed inset-0 bg-text/50 backdrop-blur-sm z-40 animate-fade-in"
+          className="fixed inset-0 bg-overlay backdrop-blur-sm z-40 animate-fade-in"
           onClick={() => {
             if (paletteOpen) handleClosePalette();
             if (aiModalOpen) setAiModalOpen(false);
@@ -619,8 +691,8 @@ function AppContent() {
         isExecuting={aiEditing}
       />
 
-      {/* AI Editing Overlay */}
-      {aiEditing && (
+      {/* AI Editing Overlay — modal runs only; the sidebar shows progress inline */}
+      {aiEditing && aiModalOpen && (
         <div className="fixed inset-0 bg-bg/50 backdrop-blur-sm z-50 flex items-center justify-center">
           <div className="flex items-center gap-2">
             {aiProvider === "codex" ? (
@@ -741,10 +813,8 @@ function App() {
 
   // Add platform class for OS-specific styling (e.g., keyboard shortcuts)
   useEffect(() => {
-    const isMac = /Mac|iPhone|iPad|iPod/.test(navigator.userAgent);
-    document.documentElement.classList.add(
-      isMac ? "platform-mac" : "platform-other",
-    );
+    const os = isMac ? "mac" : isWindows ? "windows" : "linux";
+    document.documentElement.classList.add(`platform-${os}`);
   }, []);
 
   // Check for app updates on startup (folder mode only)

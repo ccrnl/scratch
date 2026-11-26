@@ -3,6 +3,19 @@ export interface NoteMetadata {
   title: string;
   preview: string;
   modified: number;
+  /** Frontmatter tags. Body `#hashtags` are prose and are not included. */
+  tags: string[];
+}
+
+/**
+ * A folder backed by a tag rather than a directory.
+ *
+ * `name` is the single path segment shown in the sidebar; `tag` may contain
+ * `/` for nested tags such as `area/finance`.
+ */
+export interface SmartFolder {
+  name: string;
+  tag: string;
 }
 
 export interface Note {
@@ -54,12 +67,16 @@ export interface Settings {
   textDirection?: TextDirection;
   editorWidth?: EditorWidth;
   customEditorWidthPx?: number;
+  sidebarWidthPx?: number;
   defaultNoteName?: string;
   interfaceZoom?: number;
   sidebarWidth?: number;
   resourceStorageLocation?: ResourceStorageLocation;
   ollamaModel?: string;
+  /** Model chosen per AI harness, keyed by provider id. */
+  aiModels?: Record<string, string>;
   ignoredPatterns?: string[];
+  smartFolders?: SmartFolder[];
   customColorsLight?: CustomColors;
   customColorsDark?: CustomColors;
   itemColors?: Record<string, ItemColorConfig>;
@@ -78,4 +95,6 @@ export interface FolderNode {
   path: string;
   children: FolderNode[];
   notes: NoteMetadata[];
+  /** Set when this folder's contents come from a tag query, not from disk. */
+  smartTag?: string;
 }
