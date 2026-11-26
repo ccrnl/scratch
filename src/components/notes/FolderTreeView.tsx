@@ -38,6 +38,7 @@ import {
   SettingsIcon,
 } from "../icons";
 import * as notesService from "../../services/notes";
+import { resolveItemColor } from "../../lib/itemColor";
 import type { FolderNode, NoteMetadata, Settings, ItemColorConfig } from "../../types/note";
 
 const STORAGE_KEY = "scratch:collapsedFolders";
@@ -70,6 +71,23 @@ function getContrastColor(hex: string): string {
   const b = parseInt(hex.slice(5, 7), 16);
   const brightness = (r * 299 + g * 587 + b * 114) / 1000;
   return brightness > 150 ? "#1a1a1a" : "#ffffff";
+}
+
+// Notes get a lighter treatment than folders: an accent bar placed just before the icon
+// (so it follows the indentation) and a gradient fading to the theme background
+function getNoteColorStyle(hex: string, contentOffset: number): React.CSSProperties {
+  const barX = Math.max(contentOffset - 7, 0);
+  return {
+    backgroundImage: `linear-gradient(${hex}, ${hex}), linear-gradient(to right, ${hex}66 0%, ${hex}1f 55%, ${hex}00 100%)`,
+    backgroundSize: `3px 100%, calc(100% - ${barX}px) 100%`,
+    backgroundPosition: `${barX}px 0, ${barX}px 0`,
+    backgroundRepeat: "no-repeat",
+  };
+}
+
+// Folders keep a solid look; the vertical fade only covers 30% of the range used by notes
+function getFolderColorStyle(hex: string): React.CSSProperties {
+  return { backgroundImage: `linear-gradient(to bottom, ${hex}, ${hex}b3)` };
 }
 
 // Compact file item for folder tree (VS Code / Obsidian style)
@@ -143,9 +161,9 @@ const FileItem = memo(function FileItem({
     }
   }, [isSelected]);
 
-  const contrastColor = useMemo(
-    () => (itemColor ? getContrastColor(itemColor) : null),
-    [itemColor],
+  const noteColorStyle = useMemo(
+    () => (itemColor ? getNoteColorStyle(itemColor, depth * 12 + 8) : null),
+    [itemColor, depth],
   );
   const isColored = !!itemColor;
 
@@ -190,7 +208,7 @@ const FileItem = memo(function FileItem({
                     ? "ring-2 ring-text/30"
                     : isMultiSelected
                       ? "ring-1 ring-text/20"
-                      : "hover:opacity-80"
+                      : "hover:bg-bg-muted"
                   : isSelected &&
                       (!focusedItemKey || focusedItemKey === `note:${note.id}`)
                     ? "bg-bg-muted group-focus/notelist:ring-1 group-focus/notelist:ring-text-muted"
@@ -201,9 +219,7 @@ const FileItem = memo(function FileItem({
           style={{
             paddingLeft: `${depth * 12 + 8}px`,
             paddingRight: "8px",
-            ...(isColored
-              ? { backgroundColor: itemColor!, color: contrastColor! }
-              : {}),
+            ...noteColorStyle,
           }}
           onClick={handleClick}
           role="button"
@@ -212,16 +228,16 @@ const FileItem = memo(function FileItem({
           {itemConfig?.icon ? (
             <span className="text-sm shrink-0 leading-none">{itemConfig.icon}</span>
           ) : isPinned ? (
-            <PinIcon className={`w-4 h-4 stroke-[1.6] fill-current shrink-0 ${isColored ? "" : "text-text-muted"}`} />
+            <PinIcon className="w-4 h-4 stroke-[1.6] fill-current shrink-0 text-text-muted" />
           ) : (
-            <NoteIcon className={`w-4 h-4 stroke-[1.6] shrink-0 ${isColored ? "opacity-70" : "opacity-50"}`} />
+            <NoteIcon className="w-4 h-4 stroke-[1.6] shrink-0 opacity-50" />
           )}
           <div className="flex flex-col min-w-0">
-            <span className={`text-sm truncate ${isColored ? "" : "text-text"} ${itemConfig?.bold ? "font-bold" : ""}`}>
+            <span className={`text-sm truncate text-text ${itemConfig?.bold ? "font-bold" : ""}`}>
               {cleanTitle(note.title)}
             </span>
             {itemConfig?.description && (
-              <span className={`text-xs truncate ${isColored ? "opacity-70" : "text-text-muted"}`}>
+              <span className="text-xs truncate text-text-muted">
                 {itemConfig.description}
               </span>
             )}
@@ -367,16 +383,10 @@ const FolderItemComponent = memo(function FolderItem({
 
   const folderConfig = itemColors[folder.path] ?? null;
 
-  const folderColor = useMemo(() => {
-    if (folderConfig?.color) return folderConfig.color;
-    const parts = folder.path.split("/");
-    for (let i = parts.length - 1; i >= 1; i--) {
-      const parentPath = parts.slice(0, i).join("/");
-      const parentConfig = itemColors[parentPath];
-      if (parentConfig?.applyToChildren && parentConfig.color) return parentConfig.color;
-    }
-    return null;
-  }, [folder.path, folderConfig, itemColors]);
+  const folderColor = useMemo(
+    () => resolveItemColor(itemColors, folder.path),
+    [folder.path, itemColors],
+  );
 
   const contrastColor = useMemo(
     () => (folderColor ? getContrastColor(folderColor) : null),
@@ -385,22 +395,7 @@ const FolderItemComponent = memo(function FolderItem({
   const isColored = !!folderColor;
 
   const getColorForNote = useCallback(
-    (noteId: string): string | null => {
-      const own = itemColors[noteId];
-      if (own?.color) return own.color;
-      const lastSlash = noteId.lastIndexOf("/");
-      if (lastSlash <= 0) return null;
-      const noteFolderPath = noteId.substring(0, lastSlash);
-      const fc = itemColors[noteFolderPath];
-      if (fc?.applyToChildren && fc.color) return fc.color;
-      const fParts = noteFolderPath.split("/");
-      for (let i = fParts.length - 1; i >= 1; i--) {
-        const parentPath = fParts.slice(0, i).join("/");
-        const parentConfig = itemColors[parentPath];
-        if (parentConfig?.applyToChildren && parentConfig.color) return parentConfig.color;
-      }
-      return null;
-    },
+    (noteId: string) => resolveItemColor(itemColors, noteId),
     [itemColors],
   );
 
@@ -445,13 +440,20 @@ const FolderItemComponent = memo(function FolderItem({
                     ? "bg-bg-muted/50 ring-1 ring-text-muted/30"
                     : "hover:bg-bg-muted"
             }`}
-            style={{
-              paddingLeft: `${depth * 12 + 8}px`,
-              paddingRight: "8px",
-              ...(isColored
-                ? { backgroundColor: folderColor!, color: contrastColor! }
-                : {}),
-            }}
+            style={
+              isColored
+                ? {
+                    marginLeft: `${depth * 12}px`,
+                    paddingLeft: "8px",
+                    paddingRight: "8px",
+                    ...getFolderColorStyle(folderColor!),
+                    color: contrastColor!,
+                  }
+                : {
+                    paddingLeft: `${depth * 12 + 8}px`,
+                    paddingRight: "8px",
+                  }
+            }
             onClick={handleClick}
             role="button"
             tabIndex={-1}

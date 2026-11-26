@@ -161,6 +161,7 @@ import { EditorWidthHandles } from "./EditorWidthHandle";
 import { ScratchBlockMath, normalizeBlockMath } from "./MathExtensions";
 import { cn } from "../../lib/utils";
 import { plainTextFromMarkdown } from "../../lib/plainText";
+import { resolveItemColor } from "../../lib/itemColor";
 import { Button, IconButton, ToolbarButton, Tooltip } from "../ui";
 import * as notesService from "../../services/notes";
 import { downloadPdf, downloadMarkdown } from "../../services/pdf";
@@ -807,6 +808,13 @@ export function Editor({
   const [, setSelectionKey] = useState(0);
   const [copyMenuOpen, setCopyMenuOpen] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
+  const noteColor = useMemo(
+    () =>
+      currentNote && settings?.itemColors
+        ? resolveItemColor(settings.itemColors, currentNote.id)
+        : null,
+    [currentNote, settings?.itemColors],
+  );
   // Delay transition classes until after initial mount to avoid format bar height animation on note load
   const [hasTransitioned, setHasTransitioned] = useState(false);
   useEffect(() => {
@@ -2995,7 +3003,12 @@ export function Editor({
                 </div>
               )}
               <div
-                className="h-full"
+                className="h-full note-accent"
+                style={
+                  noteColor
+                    ? ({ "--note-accent": noteColor } as React.CSSProperties)
+                    : undefined
+                }
                 onContextMenu={async (e) => {
                   if (!editor) return;
 
